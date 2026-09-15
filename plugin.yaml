@@ -1,0 +1,21 @@
+name: autoqq-business
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+description: Deterministic QQ authorization, commands, and EventServer delivery consumer
+provides_hooks:
+  - pre_gateway_dispatch
+requires_env:
+  - name: EVENT_SERVER_URL
+    description: Internal AutoQQ EventServer base URL
+    secret: false
+  - name: INTERNAL_API_TOKEN
+    description: Shared EventServer service authentication token
+    secret: true
+config_schema:
+  delivery_poll_enabled:
+    type: bool
+    default: true
+    description: Start delivery polling after the QQ gateway is first bound
+license: MIT
+tags: [gateway, qqbot, authorization, notifications]

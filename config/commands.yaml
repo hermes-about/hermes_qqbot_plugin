@@ -1,0 +1,16 @@
+{
+  "commands": {
+    "/help": "public",
+    "/events": "public",
+    "/whoami": "public",
+    "/bind": "authorized",
+    "/unbind": "authorized",
+    "/bindings": "authorized",
+    "/grant": "admin",
+    "/revoke": "admin",
+    "/admin": "admin",
+    "/unadmin": "admin",
+    "/permissions": "admin",
+    "/userlist": "admin"
+  }
+}

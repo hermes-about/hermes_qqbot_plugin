@@ -1,126 +1,266 @@
-# AutoQQ Hermes Business Plugin
+# AutoQQ Hermes Plugin
 
-This repository is an independent Python project that implements the deterministic AutoQQ layer
-between Hermes QQBot messages and the AutoQQ EventServer.
+AutoQQ Plugin 是运行在 Hermes Gateway 内的 QQ 业务接入插件。它在消息进入 LLM 前完成权限与
+命令处理，并从 AutoQQ EventServer 领取通知，通过 Hermes 已连接的 QQBot 主动向用户发送私聊。
 
-Implemented in `0.1.0`:
+Plugin 不连接 MySQL、不采集事件源，也不持有 QQ App 凭据。用户、权限、订阅、事件和待投递
+消息均由 EventServer 管理。
 
-- native Hermes `plugin.yaml` plus `register(ctx)` entry point;
-- `pre_gateway_dispatch` authorization before Hermes auth/pairing/agent dispatch;
-- independent `chat` and `command` permission gates with blocked-account precedence;
-- explicit `public`, `authorized`, and `admin` command policies;
-- deterministic user/admin commands that always return `skip` and never reach the LLM;
-- short-lived in-process permission cache with mutation invalidation;
-- authenticated, bounded, no-redirect EventServer HTTP client;
-- generic delivery claim, QQBot adapter send, lease `ack`/`fail`, backoff, and safe shutdown;
-- masked OpenID audit fields and Secret/token redaction helpers.
+## 服务能力
 
-The Plugin has no database dependency and does not import EventServer models or Warframe providers.
+- 从 Hermes 可信消息上下文识别 QQ OpenID。
+- 分别控制普通聊天权限 `chat` 和业务命令权限 `command`。
+- 支持 `public`、`authorized`、`admin` 三类命令策略。
+- 在 LLM 前确定性处理命令；已处理命令不会进入 LLM。
+- 为未知用户申请一次性 pairing code。
+- 管理用户授权、角色与事件订阅。
+- 轮询 EventServer delivery，主动向用户 QQ 私聊并回写 `ack` 或 `fail`。
+- EventServer 不可用、响应异常或用户被封禁时默认拒绝，不降级为放行。
 
-## Layout
+消息与通知链路：
 
 ```text
-hermes_qqbot_plugin/
-├── plugin.yaml
-├── __init__.py
-├── config/commands.yaml
-├── autoqq_business_plugin/
-├── tests/
-└── docs/qq-payload-probe.md
+QQ 消息 -> Hermes QQBot -> AutoQQ Plugin
+                         -> 权限/命令请求 -> EventServer -> MySQL
+
+EventServer delivery -> Plugin 领取 -> Hermes QQBot 主动私聊 -> ack/fail
 ```
 
-`config/commands.yaml` intentionally contains JSON syntax. JSON is a valid YAML subset and lets the
-Plugin parse its signed-off policy with the Python standard library instead of adding a YAML runtime
-dependency.
+## 部署前提
 
-## Configuration
+- Hermes Gateway 已配置并连接 QQBot。
+- AutoQQ EventServer 已完成迁移、启动并处于 `ready` 状态。
+- Hermes 与 EventServer 加入同一个 Docker 网络。
+- Hermes 持久数据目录可写；本文以容器内 `/opt/data` 为例。
+- Hermes Python 环境包含 `httpx>=0.28,<1`。
+- EventServer 与 Plugin 使用同一个 `INTERNAL_API_TOKEN`。
 
-Copy `.env.example` into the Hermes deployment's secret/configuration mechanism. Do not commit the
-real `INTERNAL_API_TOKEN`, OpenIDs, or QQ credentials. The token must be at least 32 characters.
-Delivery polling also requires a stable, per-instance `DELIVERY_WORKER_ID`.
+当前 Plugin manifest 为版本 2。Hermes Agent `v0.21.2` 的原生 Git installer 只接受 manifest
+版本 1，因此已验证的部署方式是直接把 Git 仓库克隆到 Hermes 持久插件目录，而不是执行
+`hermes plugins install <git-url>`。后续 Hermes 升级后可重新验证原生安装能力。
 
-The implementation always denies on missing users, blocked users, invalid configuration, malformed
-EventServer responses, timeouts, and internal processing errors. There is no global allow default.
+## 使用 Git clone 部署
 
-## Install from GitHub
+以下示例假定：
 
-Python package installation is the recommended form. Run the command in the same Python environment
-as Hermes so that Hermes can discover the `hermes_agent.plugins` entry point:
+- Hermes 容器名为 `hermes`；
+- Hermes Compose service 为 `hermes-gateway`；
+- 持久插件目录为 `/opt/data/plugins`。
+
+实际名称不同时，应先用 `docker inspect` 和 Hermes 命令确认，不要直接照搬。
+
+### 1. 准备 Plugin 环境变量
+
+在宿主机安全目录创建 `plugin.env`：
+
+```dotenv
+EVENT_SERVER_URL=http://autoqq-eventserver-api:8080
+INTERNAL_API_TOKEN=<与EventServer完全相同的随机Token>
+
+DELIVERY_WORKER_ID=hermes-main
+DELIVERY_POLL_ENABLED=true
+DELIVERY_POLL_INTERVAL_SECONDS=5
+DELIVERY_CLAIM_BATCH_SIZE=10
+DELIVERY_LEASE_SECONDS=60
+
+PERMISSION_CACHE_TTL_SECONDS=30
+COMMAND_RATE_LIMIT_COUNT=10
+COMMAND_RATE_LIMIT_WINDOW_SECONDS=60
+DEFAULT_TIMEZONE=Asia/Shanghai
+```
+
+限制文件权限：
 
 ```bash
-python -m pip install \
-  "autoqq-business-plugin @ git+https://github.com/fkYang/hermes_qqbot_plugin.git@main"
-hermes plugins enable autoqq-business
+chmod 600 /absolute/secure/path/plugin.env
 ```
 
-For a reproducible deployment, replace `main` with a release tag or full commit SHA. To update an
-existing Git installation:
+将环境文件注入 Hermes Gateway，并让 Hermes 与 EventServer 共用网络：
+
+```yaml
+services:
+  hermes-gateway:
+    env_file:
+      - /absolute/secure/path/plugin.env
+    networks:
+      - hermes_net
+
+networks:
+  hermes_net:
+    external: true
+    name: my_web_net
+```
+
+不要给 Plugin 配置 `MYSQL_*`、`DATABASE_URL`、QQ Secret 或腾讯 API 凭据。
+
+### 2. 克隆 Plugin
+
+首次安装：
 
 ```bash
-python -m pip install --upgrade --force-reinstall \
-  "autoqq-business-plugin @ git+https://github.com/fkYang/hermes_qqbot_plugin.git@main"
+docker exec -u 0 hermes mkdir -p /opt/data/plugins
+docker exec -u 0 hermes git clone --branch main --single-branch \
+  https://github.com/fkYang/hermes_qqbot_plugin.git \
+  /opt/data/plugins/autoqq-business
 ```
 
-Hermes also supports a native directory plugin. This keeps `plugin.yaml` and the root `register(ctx)`
-entry point visible to its directory loader:
+`main` 表示取得当前最新版本。生产环境建议在克隆后固定到发布 tag 或完整 commit SHA：
 
 ```bash
-git clone https://github.com/fkYang/hermes_qqbot_plugin.git \
-  ~/.hermes/plugins/autoqq-business
-hermes plugins doctor ~/.hermes/plugins/autoqq-business
-hermes plugins enable autoqq-business
+docker exec -u 0 hermes git -C /opt/data/plugins/autoqq-business \
+  checkout --detach <release-tag-or-full-commit-sha>
 ```
 
-Choose one loading form for a deployment; do not install the entry-point package and clone the same
-plugin into Hermes' directory at the same time. For a directory install, ensure `httpx>=0.28,<1` is
-available in the Hermes Python environment.
+确保 Hermes Gateway 用户可以读取该目录。已验证环境使用 UID/GID `10000:10000`；其他镜像
+应先确认实际运行用户：
 
-Before enabling against real QQ, configure the required environment variables, complete the checks
-in [`docs/qq-payload-probe.md`](docs/qq-payload-probe.md), and run the Hermes plugin doctor for a
-directory install. Directory installation, doctor, enablement, gateway loading and proactive QQBot
-C2C delivery were verified against Hermes Agent `v0.21.2` on 2026-09-15. See the standalone
-[`操作指南.md`](操作指南.md) for the EventServer/Hermes deployment sequence.
+```bash
+docker exec -u 0 hermes chown -R 10000:10000 /opt/data/plugins/autoqq-business
+```
 
-Current upstream Hermes also provides `register_platform_handler`. AutoQQ uses it to bind the QQBot
-adapter and start the delivery worker when QQBot connects. `pre_gateway_dispatch` repeats that binding
-as a compatibility fallback. The worker sends only through the read-only Hermes adapter handle; it
-does not hold QQ credentials or call Tencent APIs directly.
+如果 Hermes 容器不包含 Git，可在宿主机克隆后放入 Hermes 的持久 volume 对应目录，最终
+容器内路径仍应为 `/opt/data/plugins/autoqq-business`。
 
-## Commands
+### 3. 检查、启用并重建 Gateway
 
-| Command | Policy | Behavior |
+```bash
+docker exec hermes hermes plugins doctor \
+  /opt/data/plugins/autoqq-business --ci
+
+docker exec hermes hermes plugins enable \
+  autoqq-business --no-allow-tool-override
+```
+
+环境变量变化和新 Plugin 都需要重新创建 Gateway 容器。请在 Hermes Compose 项目目录执行：
+
+```bash
+docker compose up -d --force-recreate hermes-gateway
+```
+
+验证：
+
+```bash
+docker exec hermes hermes gateway status --deep
+docker exec hermes hermes plugins doctor \
+  /opt/data/plugins/autoqq-business --ci
+docker logs --since 10m hermes
+```
+
+期望结果：
+
+- Gateway 为 running；
+- `autoqq-business` 为 enabled；
+- Plugin doctor 的 manifest、导入、注册和 hook 检查通过；
+- EventServer 日志持续出现成功的 delivery claim 请求；
+- Hermes 日志没有 AutoQQ 加载或认证错误。
+
+## 首管理员与用户授权
+
+### 首管理员
+
+已知管理员稳定 QQ OpenID 时，可由 EventServer 的 `INITIAL_ADMIN_OPENIDS` 完成初始化。
+
+不知道完整 OpenID 时：
+
+1. 保持 EventServer 的 `INITIAL_ADMIN_OPENIDS=`。
+2. 预定管理员向机器人发送一条普通消息。
+3. Plugin 返回一个约 10 分钟有效的 pairing code。
+4. 运维人员在 EventServer 部署主机执行本地一次性首管理员引导命令。
+5. 引导成功后，该账号获得 `active + admin + chat=true + command=true`。
+
+一次性首管理员引导由 EventServer 完成，Plugin 不直接修改数据库。
+
+### 后续用户
+
+未知用户向机器人发送消息后会收到 pairing code。管理员在过期前执行：
+
+```text
+/grant <pairing_code> chat
+/grant <pairing_code> command
+/grant <pairing_code> all
+```
+
+`chat` 和 `command` 相互独立：
+
+| 权限 | 能力 |
+| --- | --- |
+| `chat=true` | 普通消息可以进入 Hermes LLM |
+| `command=true` | 可以执行受保护命令、管理订阅并接收事件通知 |
+
+管理员角色不会自动授予权限。管理员命令要求账号为 `active`、`role=admin` 且
+`command=true`。
+
+## 用户命令
+
+| 命令 | 访问策略 | 用途 |
 | --- | --- | --- |
-| `/help`, `/events`, `/whoami` | public | Still checks account status; blocked users are denied |
-| `/bind`, `/unbind`, `/bindings` | authorized | Requires active account and `command=true` |
-| `/grant`, `/revoke`, `/admin`, `/unadmin`, `/permissions`, `/userlist` | admin | Also requires `role=admin` |
+| `/help` | public | 查看命令帮助 |
+| `/events` | public | 查看可订阅事件 |
+| `/whoami` | public | 查看自己的脱敏身份、状态和权限 |
+| `/bind <event_key>` | authorized | 订阅事件 |
+| `/unbind <event_key>` | authorized | 取消订阅 |
+| `/bindings` | authorized | 查看当前订阅 |
+| `/grant <目标或配对码> chat\|command\|all` | admin | 授予权限 |
+| `/revoke <目标> chat\|command\|all` | admin | 撤销权限 |
+| `/admin <目标>` | admin | 设置管理员角色，不自动授予权限 |
+| `/unadmin <目标>` | admin | 移除管理员角色 |
+| `/permissions <目标>` | admin | 查看目标权限 |
+| `/userlist` | admin | 当前 EventServer v1 暂未提供列表接口，命令会安全终止 |
 
-`/grant` and `/revoke` require an explicit `chat`, `command`, or `all` dimension. Eight-character
-EventServer pairing codes are accepted by `/grant`. `@nickname` is rejected until a real QQ payload
-probe demonstrates a stable mentioned-member OpenID; no nickname lookup is attempted.
+`public` 表示无需预先授权，不表示绕过身份检查。显式封禁用户不能使用 public 命令；
+EventServer 不可用时 public 命令也会失败关闭。无法可靠解析 `@昵称` 时，应使用 pairing code
+或明确 OpenID，不能按昵称授权。
 
-The current EventServer v1 has no user-list endpoint, so `/userlist` returns a deterministic
-"not available" response and skips the LLM. Adding that endpoint requires a versioned cross-project
-contract change and matching tests.
+## 事件通知
 
-## Offline verification
+用户具有 `command=true` 并完成 `/bind <event_key>` 后，EventServer 在事件发生时创建
+delivery。Plugin 自动完成：
 
-The following commands were verified using the already-present EventServer Python environment; no
-dependencies were installed and no network, database, Hermes, QQ, or Warframe service was contacted:
-
-```bash
-../eventserver/.venv/bin/python -m pytest
-../eventserver/.venv/bin/ruff check .
-../eventserver/.venv/bin/ruff format --check .
+```text
+claim -> Hermes QQBot 私聊 -> ack/fail
 ```
 
-The suite uses `httpx.MockTransport` and fake Hermes adapters. A separate authorized test on
-2026-09-15 also verified the real `claim -> Hermes QQBot send -> ack` path; private/group payload
-coverage and platform limits must still be rechecked when the Hermes/QQBot version changes.
+通知不会进入 LLM，也不会创建普通 Agent 对话。投递语义为至少一次：如果 QQ 已发送成功，
+但 Plugin 在回写 `ack` 前退出，租约过期后可能再次发送同一通知。
 
-## Delivery semantics
+## 更新与回退
 
-Delivery is at least once. The worker validates the generic target and message, sends through the
-Hermes QQBot adapter, and then writes `ack` or `fail` with the current lease token. It never retries a
-message locally; EventServer owns retry timing and the terminal `dead` state. If sending succeeds but
-the process dies before `ack`, the notification may be repeated after lease expiry. QQBot idempotency
-support still needs environment verification.
+更新前先记录当前 commit 并确认工作树干净：
+
+```bash
+docker exec hermes git -C /opt/data/plugins/autoqq-business rev-parse HEAD
+docker exec hermes git -C /opt/data/plugins/autoqq-business status --short
+```
+
+更新到远端 `main`：
+
+```bash
+docker exec -u 0 hermes git -C /opt/data/plugins/autoqq-business fetch origin main
+docker exec -u 0 hermes git -C /opt/data/plugins/autoqq-business \
+  checkout --detach origin/main
+docker exec -u 0 hermes chown -R 10000:10000 /opt/data/plugins/autoqq-business
+docker exec hermes hermes plugins doctor \
+  /opt/data/plugins/autoqq-business --ci
+docker compose up -d --force-recreate hermes-gateway
+```
+
+回退时 checkout 到之前记录的完整 commit，再重新执行 doctor 并重建 Gateway。不要在运行目录
+保留手工修改；环境配置应继续放在独立的 `plugin.env` 中。
+
+## 常见问题
+
+| 现象 | 检查项 |
+| --- | --- |
+| Plugin doctor 报 URL 或 Token 配置错误 | 确认环境变量已经注入 doctor 和 Gateway 进程，Token 至少 32 个字符 |
+| Gateway 启动后未加载 Plugin | 检查目录、所有权、enable 状态，并重新创建 Gateway 容器 |
+| `/help` 也被拒绝 | 检查 EventServer `/ready`、Docker 网络和两端 Token；Plugin 按失败关闭处理 |
+| 一直领取不到通知 | 检查 `DELIVERY_POLL_ENABLED`、稳定 worker ID、用户 `command` 权限和订阅 |
+| delivery 持续 retry | 检查 Hermes QQBot 连接、发送限制和 EventServer 的脱敏错误码 |
+| 通知偶尔重复 | 这是发送成功但 `ack` 前退出时的至少一次投递边界 |
+
+## 参考文档
+
+- [完整环境变量模板](.env.example)
+- [详细操作与权限语义](操作指南.md)
+- [QQ/Hermes payload 核验清单](docs/qq-payload-probe.md)
+- [AutoQQ EventServer](https://github.com/fkYang/hermes_event_server)

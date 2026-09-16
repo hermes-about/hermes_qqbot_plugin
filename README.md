@@ -261,6 +261,6 @@ docker compose up -d --force-recreate hermes-gateway
 ## 参考文档
 
 - [完整环境变量模板](.env.example)
-- [详细操作与权限语义](操作指南.md)
+- [权限、命令和投递契约](CONTRACT.md)
 - [QQ/Hermes payload 核验清单](docs/qq-payload-probe.md)
 - [AutoQQ EventServer](https://github.com/fkYang/hermes_event_server)

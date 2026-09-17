@@ -56,11 +56,26 @@ class DispatchDecision:
 
 
 @dataclass(frozen=True)
+class MatchKeyOption:
+    key: str
+    label: str
+
+
+@dataclass(frozen=True)
 class EventInfo:
     event_key: str
     display_name: str
     description: str
     deprecated: bool = False
+    match_key_field: str | None = None
+    match_keys_required: bool = False
+    match_key_options: tuple[MatchKeyOption, ...] = ()
+
+    def option_label(self, key: str) -> str | None:
+        for option in self.match_key_options:
+            if option.key == key:
+                return option.label
+        return None
 
 
 @dataclass(frozen=True)
@@ -68,6 +83,8 @@ class SubscriptionInfo:
     event_key: str
     locale: str
     changed: bool | None = None
+    match_keys: tuple[str, ...] = ()
+    updated: bool = False
 
 
 @dataclass(frozen=True)

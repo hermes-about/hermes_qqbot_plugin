@@ -8,6 +8,7 @@ from autoqq_business_plugin.command_policy import CommandPolicyRegistry
 from autoqq_business_plugin.commands import CommandService
 from autoqq_business_plugin.models import (
     EventInfo,
+    MatchKeyOption,
     PermissionSnapshot,
     SubscriptionInfo,
 )
@@ -34,6 +35,10 @@ class FakeClient:
         self.permissions: dict[str, PermissionSnapshot] = {self.snapshot.openid: self.snapshot}
         self.calls: list[tuple] = []
         self.raise_permission: Exception | None = None
+        self.updated = False
+        self.subscriptions: list[SubscriptionInfo] = [
+            SubscriptionInfo("demo.event.changed", "zh-CN")
+        ]
 
     def get_permission(self, platform: str, openid: str) -> PermissionSnapshot:
         self.calls.append(("permission", platform, openid))
@@ -45,15 +50,28 @@ class FakeClient:
 
     def list_events(self):
         self.calls.append(("events",))
-        return [EventInfo("demo.event.changed", "示例事件", "description")]
+        return [
+            EventInfo("demo.event.changed", "示例事件", "description"),
+            EventInfo(
+                "warframe.cetus.bounty_current",
+                "Cetus 当前轮次赏金",
+                "当前轮次出现的任务",
+                match_key_field="match_keys",
+                match_keys_required=True,
+                match_key_options=(
+                    MatchKeyOption("RescueBountyResc", "搜索并救援"),
+                    MatchKeyOption("ReclamationBountyCap", "捕获 Grineer 特工"),
+                ),
+            ),
+        ]
 
     def list_subscriptions(self, platform: str, openid: str):
         self.calls.append(("bindings", platform, openid))
-        return [SubscriptionInfo("demo.event.changed", "zh-CN")]
+        return list(self.subscriptions)
 
-    def subscribe(self, platform: str, openid: str, event_key: str):
-        self.calls.append(("bind", platform, openid, event_key))
-        return SubscriptionInfo(event_key, "zh-CN", True)
+    def subscribe(self, platform: str, openid: str, event_key: str, match_keys=None):
+        self.calls.append(("bind", platform, openid, event_key, tuple(match_keys or ())))
+        return SubscriptionInfo(event_key, "zh-CN", True, tuple(match_keys or ()), self.updated)
 
     def unsubscribe(self, platform: str, openid: str, event_key: str):
         self.calls.append(("unbind", platform, openid, event_key))

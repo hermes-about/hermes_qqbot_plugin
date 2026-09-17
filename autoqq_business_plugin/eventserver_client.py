@@ -7,7 +7,13 @@ from uuid import uuid4
 
 import httpx
 
-from .models import DeliveryItem, EventInfo, PermissionSnapshot, SubscriptionInfo
+from .models import (
+    DeliveryItem,
+    EventInfo,
+    MatchKeyOption,
+    PermissionSnapshot,
+    SubscriptionInfo,
+)
 
 
 class EventServerError(RuntimeError):
@@ -46,6 +52,39 @@ def _boolean(value: Any, field: str) -> bool:
     if not isinstance(value, bool):
         raise EventServerProtocolError(f"invalid {field}")
     return value
+
+
+def _optional_text(value: Any, field: str) -> str | None:
+    return None if value is None else _text(value, field)
+
+
+def _optional_boolean(value: Any, field: str) -> bool:
+    return False if value is None else _boolean(value, field)
+
+
+def _match_keys(value: Any, field: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise EventServerProtocolError(f"invalid {field}")
+    return tuple(value)
+
+
+def _match_key_options(value: Any) -> tuple[MatchKeyOption, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise EventServerProtocolError("invalid match_key_options")
+    options: list[MatchKeyOption] = []
+    for item in value:
+        data = _object(item)
+        options.append(
+            MatchKeyOption(
+                key=_text(data.get("key"), "match_key_options.key"),
+                label=_text(data.get("label"), "match_key_options.label"),
+            )
+        )
+    return tuple(options)
 
 
 class EventServerClient:
@@ -160,6 +199,11 @@ class EventServerClient:
                     display_name=_text(data.get("display_name"), "display_name"),
                     description=_text(data.get("description"), "description", allow_empty=True),
                     deprecated=_boolean(data.get("deprecated"), "deprecated"),
+                    match_key_field=_optional_text(data.get("match_key_field"), "match_key_field"),
+                    match_keys_required=_optional_boolean(
+                        data.get("match_keys_required"), "match_keys_required"
+                    ),
+                    match_key_options=_match_key_options(data.get("match_key_options")),
                 )
             )
         return result
@@ -176,23 +220,34 @@ class EventServerClient:
             SubscriptionInfo(
                 event_key=_text(_object(item).get("event_key"), "event_key"),
                 locale=_text(_object(item).get("locale"), "locale"),
+                match_keys=_match_keys(_object(item).get("match_keys"), "match_keys"),
             )
             for item in payload
         ]
 
-    def subscribe(self, platform: str, openid: str, event_key: str) -> SubscriptionInfo:
+    def subscribe(
+        self,
+        platform: str,
+        openid: str,
+        event_key: str,
+        match_keys: tuple[str, ...] | None = None,
+    ) -> SubscriptionInfo:
         data = _object(
             self._request(
                 "POST",
                 f"/v1/users/{quote(openid, safe='')}/subscriptions",
-                payload={"event_key": event_key},
+                payload={"event_key": event_key, "match_keys": list(match_keys or ())},
                 params={"platform": platform},
             )
         )
+        created = _boolean(data.get("created"), "created")
+        updated = _optional_boolean(data.get("updated"), "updated")
         return SubscriptionInfo(
             event_key=_text(data.get("event_key"), "event_key"),
             locale=_text(data.get("locale"), "locale"),
-            changed=_boolean(data.get("created"), "created"),
+            changed=created or updated,
+            match_keys=_match_keys(data.get("match_keys"), "match_keys"),
+            updated=updated,
         )
 
     def unsubscribe(self, platform: str, openid: str, event_key: str) -> SubscriptionInfo:

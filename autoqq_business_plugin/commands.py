@@ -2,14 +2,15 @@ import re
 from collections.abc import Callable
 
 from .command_policy import CommandPolicyRegistry
-from .eventserver_client import EventServerClient
-from .models import MessageIdentity, ParsedCommand, PermissionSnapshot
+from .eventserver_client import EventServerClient, EventServerResponseError
+from .models import EventInfo, MessageIdentity, ParsedCommand, PermissionSnapshot
 from .observability import mask_identifier
 from .permission_cache import PermissionCache
 
 _PAIRING_CODE = re.compile(r"^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$")
 _EXPLICIT_OPENID = re.compile(r"^[A-Za-z0-9._:-]{6,128}$")
 _DIMENSIONS = {"chat": ["chat"], "command": ["command"], "all": ["chat", "command"]}
+_MAX_MATCH_KEYS = 32
 
 
 class CommandUsageError(ValueError):
@@ -55,19 +56,27 @@ class CommandService:
         self._expect(args, 0, "/help")
         return (
             "可用命令：\n"
-            "/events\n/bind <event_key>\n/unbind <event_key>\n/bindings\n"
+            "/events\n/events <event_key>\n/bind <event_key> [关注项...]\n"
+            "/unbind <event_key>\n/bindings\n"
             "/whoami\n/help\n"
             "管理员：/grant <目标|pairing_code> chat|command|all、/revoke、"
             "/admin、/unadmin、/permissions、/userlist"
         )
 
     def _events(self, args: tuple[str, ...], *_: object) -> str:
-        self._expect(args, 0, "/events")
+        if len(args) > 1:
+            raise CommandUsageError("用法：/events 或 /events <event_key>")
         events = self._client.list_events()
-        if not events:
+        if args:
+            event = self._find_event(events, args[0])
+            if event is None:
+                return f"没有找到事件 {args[0]}。发送 /events 查看可用事件。"
+            return self._format_options(event)
+        visible = [item for item in events if not item.deprecated]
+        if not visible:
             return "当前没有可订阅事件。"
         return "可订阅事件：\n" + "\n".join(
-            f"- {item.event_key}：{item.display_name}" for item in events if not item.deprecated
+            f"- {item.event_key}：{item.display_name}{self._option_hint(item)}" for item in visible
         )
 
     def _whoami(
@@ -79,13 +88,33 @@ class CommandService:
     def _bind(
         self, args: tuple[str, ...], identity: MessageIdentity, _actor: PermissionSnapshot
     ) -> str:
-        self._expect(args, 1, "/bind <event_key>")
-        result = self._client.subscribe(identity.platform, identity.openid, args[0])
-        return (
-            f"已订阅 {result.event_key}。"
-            if result.changed
-            else f"已经订阅 {result.event_key}，无需重复操作。"
-        )
+        if not args:
+            raise CommandUsageError("用法：/bind <event_key> [关注项...]")
+        event_key = args[0]
+        requested = self._match_key_tokens(args[1:])
+        event = self._find_event(self._client.list_events(), event_key)
+        if event is not None:
+            unknown = [key for key in requested if event.option_label(key) is None]
+            if unknown:
+                return (
+                    f"关注项不在该事件的可选范围内：{unknown[0]}。"
+                    f"发送 /events {event.event_key} 查看可选值。"
+                )
+            if event.match_keys_required and not requested:
+                raise CommandUsageError(
+                    f"该事件必须指定至少一个关注项。用法：/bind {event.event_key} <关注项[,关注项]>"
+                )
+        try:
+            result = self._client.subscribe(
+                identity.platform, identity.openid, event_key, requested
+            )
+        except EventServerResponseError as exc:
+            if exc.status_code == 404:
+                return f"没有找到事件 {event_key}。发送 /events 查看可用事件。"
+            if exc.status_code == 400:
+                return f"关注项未被接受。发送 /events {event_key} 查看可选值。"
+            raise
+        return self._format_bind_result(result, event, requested)
 
     def _unbind(
         self, args: tuple[str, ...], identity: MessageIdentity, _actor: PermissionSnapshot
@@ -103,11 +132,15 @@ class CommandService:
     ) -> str:
         self._expect(args, 0, "/bindings")
         items = self._client.list_subscriptions(identity.platform, identity.openid)
-        return (
-            "当前没有订阅。"
-            if not items
-            else "当前订阅：\n" + "\n".join(f"- {item.event_key}" for item in items)
-        )
+        if not items:
+            return "当前没有订阅。"
+        lines = []
+        for item in items:
+            if item.match_keys:
+                lines.append(f"- {item.event_key}：关注 {'、'.join(item.match_keys)}")
+            else:
+                lines.append(f"- {item.event_key}：关注全部")
+        return "当前订阅：\n" + "\n".join(lines)
 
     def _grant(
         self, args: tuple[str, ...], identity: MessageIdentity, _actor: PermissionSnapshot
@@ -196,6 +229,62 @@ class CommandService:
     def _expect(args: tuple[str, ...], count: int, usage: str) -> None:
         if len(args) != count:
             raise CommandUsageError(f"用法：{usage}")
+
+    @staticmethod
+    def _find_event(events: list[EventInfo], event_key: str) -> EventInfo | None:
+        for item in events:
+            if item.event_key == event_key:
+                return item
+        return None
+
+    @staticmethod
+    def _option_hint(event: EventInfo) -> str:
+        if not event.match_key_options:
+            return ""
+        requirement = "必选" if event.match_keys_required else "可选"
+        return f"（可关注 {len(event.match_key_options)} 项，{requirement}）"
+
+    @staticmethod
+    def _format_options(event: EventInfo) -> str:
+        if not event.match_key_options:
+            return f"{event.event_key}（{event.display_name}）没有可关注的子项，直接 /bind 即可。"
+        requirement = "绑定时必须指定至少一项" if event.match_keys_required else "不指定表示全部"
+        lines = [f"{event.event_key}（{event.display_name}）可关注任务，{requirement}："]
+        lines.extend(f"- {option.key}：{option.label}" for option in event.match_key_options)
+        lines.append(f"用法：/bind {event.event_key} <关注项[,关注项]>")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _format_bind_result(result, event: EventInfo | None, requested: tuple[str, ...]) -> str:
+        if event is None or (not event.match_key_options and not requested):
+            return (
+                f"已订阅 {result.event_key}。"
+                if result.changed
+                else f"已经订阅 {result.event_key}，无需重复操作。"
+            )
+        if requested:
+            watched = "、".join(event.option_label(key) or key for key in requested)
+        else:
+            watched = "全部内容"
+        if result.updated:
+            return f"已更新 {result.event_key} 的关注项：{watched}。"
+        if result.changed:
+            return f"已订阅 {result.event_key}，关注 {watched}。"
+        return f"已经订阅 {result.event_key}，关注项未变化：{watched}。"
+
+    @staticmethod
+    def _match_key_tokens(args: tuple[str, ...]) -> tuple[str, ...]:
+        tokens: list[str] = []
+        for raw in args:
+            for part in raw.split(","):
+                token = part.strip()
+                if not token:
+                    raise CommandUsageError("关注项不能为空，多个关注项用逗号分隔。")
+                if token not in tokens:
+                    tokens.append(token)
+        if len(tokens) > _MAX_MATCH_KEYS:
+            raise CommandUsageError(f"一次最多绑定 {_MAX_MATCH_KEYS} 个关注项。")
+        return tuple(tokens)
 
     @staticmethod
     def _format_permission(snapshot: PermissionSnapshot, label: str) -> str:

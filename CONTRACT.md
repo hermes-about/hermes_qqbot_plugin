@@ -117,17 +117,23 @@ EventServer 是权限、用户、订阅、事件和 delivery 状态的唯一事�
 | 命令 | 策略 | 用途 |
 | --- | --- | --- |
 | `/help` | public | 查看帮助 |
-| `/events` | public | 查看可订阅事件 |
+| `/events [event_key]` | public | 查看可订阅事件；带参数时列出该事件的可关注项 |
 | `/whoami` | public | 查看自己的脱敏身份和权限 |
-| `/bind <event_key>` | authorized | 订阅事件 |
+| `/bind <event_key> [关注项...]` | authorized | 订阅事件，可指定要关注的目标项 |
 | `/unbind <event_key>` | authorized | 取消订阅 |
-| `/bindings` | authorized | 查看订阅 |
+| `/bindings` | authorized | 查看订阅及其关注项 |
 | `/grant <目标或 pairing_code> chat\|command\|all` | admin | 授予权限 |
 | `/revoke <目标> chat\|command\|all` | admin | 撤销权限 |
 | `/admin <目标>` | admin | 设置管理员角色 |
 | `/unadmin <目标>` | admin | 移除管理员角色 |
 | `/permissions <目标>` | admin | 查看目标权限 |
 | `/userlist` | admin | 当前 EventServer v1 未提供列表接口，安全终止 |
+
+订阅的「关注项」是事件目录为该事件声明的受控取值。`/events <event_key>` 列出可选项，
+`/bind` 一个或多个关注项即只接收命中这些项的投递；不指定关注项表示关注该事件的全部内容，
+但事件声明 `match_keys_required` 时必须显式指定。
+关注项由 EventServer 校验，用户无法写入目录之外的任意值。重复绑定同一事件时，关注项以
+最后一次为准。
 
 `public` 只表示无需业务授权，不表示匿名。`/whoami` 只能展示调用者自己的脱敏信息。
 无法可靠解析被 @ 用户的 OpenID 时必须使用 pairing code 或明确 OpenID，不得按昵称授权。
@@ -137,9 +143,9 @@ EventServer 是权限、用户、订阅、事件和 delivery 状态的唯一事�
 | Plugin 动作 | EventServer API | 契约要求 |
 | --- | --- | --- |
 | 查询权限 | `GET /v1/users/{openid}/permission` | 返回账号状态、角色、`chat`、`command` |
-| 查看事件 | `GET /v1/events` | 只返回已注册且启用的事件 |
-| 查看订阅 | `GET /v1/users/{openid}/subscriptions` | 返回稳定 event key |
-| 新增订阅 | `POST /v1/users/{openid}/subscriptions` | 幂等 |
+| 查看事件 | `GET /v1/events` | 只返回已注册且启用的事件；可关注项来自目录声明 |
+| 查看订阅 | `GET /v1/users/{openid}/subscriptions` | 返回稳定 event key 与该订阅的关注项 |
+| 新增订阅 | `POST /v1/users/{openid}/subscriptions` | 幂等，可携带 `match_keys`；响应回显 `match_keys` 与 `updated` |
 | 删除订阅 | `DELETE /v1/users/{openid}/subscriptions/{event_key}` | 幂等 |
 | 授予权限 | `POST /v1/users/{openid}/grant` | 显式权限维度，管理员操作 |
 | 撤销权限 | `POST /v1/users/{openid}/revoke` | 显式权限维度，管理员操作 |

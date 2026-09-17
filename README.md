@@ -195,11 +195,11 @@ docker logs --since 10m hermes
 | 命令 | 访问策略 | 用途 |
 | --- | --- | --- |
 | `/help` | public | 查看命令帮助 |
-| `/events` | public | 查看可订阅事件 |
+| `/events [event_key]` | public | 查看可订阅事件；带事件键时列出该事件的可关注任务 |
 | `/whoami` | public | 查看自己的脱敏身份、状态和权限 |
-| `/bind <event_key>` | authorized | 订阅事件 |
+| `/bind <event_key> [关注项...]` | authorized | 订阅事件，可指定要关注的任务 |
 | `/unbind <event_key>` | authorized | 取消订阅 |
-| `/bindings` | authorized | 查看当前订阅 |
+| `/bindings` | authorized | 查看当前订阅及其关注项 |
 | `/grant <目标或配对码> chat\|command\|all` | admin | 授予权限 |
 | `/revoke <目标> chat\|command\|all` | admin | 撤销权限 |
 | `/admin <目标>` | admin | 设置管理员角色，不自动授予权限 |
@@ -210,6 +210,14 @@ docker logs --since 10m hermes
 `public` 表示无需预先授权，不表示绕过身份检查。显式封禁用户不能使用 public 命令；
 EventServer 不可用时 public 命令也会失败关闭。无法可靠解析 `@昵称` 时，应使用 pairing code
 或明确 OpenID，不能按昵称授权。
+
+### 关注项
+
+有些事件支持「只关注其中一部分内容」，例如 Cetus 赏金轮换事件支持关注具体任务。关注项的
+取值由 EventServer 事件目录声明，Plugin 不做任何猜测：`/events <event_key>` 列出全部可选项，
+`/bind <event_key> 关注项A,关注项B` 只接收命中这些项的投递。事件声明关注项必填时，绑定必须
+带至少一项；不指定且事件允许时表示关注该事件的全部内容。关注项可以写成逗号分隔的一串，也
+可以写成多个空格分隔的参数。
 
 ## 事件通知
 

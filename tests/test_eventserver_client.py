@@ -138,3 +138,93 @@ def test_oversized_or_malformed_response_is_rejected() -> None:
     )
     with pytest.raises(EventServerProtocolError):
         client.claim_deliveries("worker", "qqbot", 1, 60)
+
+
+def test_list_events_parses_match_key_metadata() -> None:
+    client = EventServerClient(
+        "http://eventserver:8080",
+        "x" * 32,
+        transport=httpx.MockTransport(
+            lambda _request: response(
+                200,
+                [
+                    {
+                        "event_key": "warframe.cetus.bounty_current",
+                        "display_name": "Cetus 当前轮次赏金",
+                        "description": "",
+                        "schema_version": 1,
+                        "deprecated": False,
+                        "match_key_field": "match_keys",
+                        "match_keys_required": True,
+                        "match_key_options": [{"key": "RescueBountyResc", "label": "搜索并救援"}],
+                    },
+                    {
+                        "event_key": "demo.event.changed",
+                        "display_name": "示例事件",
+                        "description": "",
+                        "schema_version": 1,
+                        "deprecated": False,
+                    },
+                ],
+            )
+        ),
+    )
+    bounty, plain = client.list_events()
+    assert bounty.match_keys_required is True
+    assert bounty.option_label("RescueBountyResc") == "搜索并救援"
+    assert bounty.option_label("NotInCatalog") is None
+    assert plain.match_key_options == () and plain.match_keys_required is False
+
+
+def test_subscribe_sends_watch_keys_and_treats_update_as_changed() -> None:
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return response(
+            200,
+            {
+                "event_key": "warframe.cetus.bounty_current",
+                "locale": "zh-CN",
+                "match_keys": ["RescueBountyResc"],
+                "created": False,
+                "updated": True,
+            },
+        )
+
+    client = EventServerClient(
+        "http://eventserver:8080", "x" * 32, transport=httpx.MockTransport(handler)
+    )
+    result = client.subscribe(
+        "qqbot", "user-openid", "warframe.cetus.bounty_current", ("RescueBountyResc",)
+    )
+    assert json.loads(seen[0].content) == {
+        "event_key": "warframe.cetus.bounty_current",
+        "match_keys": ["RescueBountyResc"],
+    }
+    assert result.match_keys == ("RescueBountyResc",)
+    assert result.updated is True
+    assert result.changed is True
+
+
+def test_list_subscriptions_parses_watch_keys() -> None:
+    client = EventServerClient(
+        "http://eventserver:8080",
+        "x" * 32,
+        transport=httpx.MockTransport(
+            lambda _request: response(
+                200,
+                [
+                    {
+                        "event_key": "warframe.cetus.bounty_current",
+                        "locale": "zh-CN",
+                        "match_keys": ["RescueBountyResc", "ReclamationBountyCap"],
+                    },
+                    {"event_key": "demo.event.changed", "locale": "zh-CN"},
+                ],
+            )
+        ),
+    )
+    watched, plain = client.list_subscriptions("qqbot", "user-openid")
+    assert watched.match_keys == ("RescueBountyResc", "ReclamationBountyCap")
+    assert plain.match_keys == ()

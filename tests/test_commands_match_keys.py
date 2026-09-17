@@ -66,6 +66,50 @@ def test_bind_rejects_an_unknown_watch_key_locally(policy) -> None:
     assert not [call for call in client.calls if call[0] == "bind"]
 
 
+def test_bind_accepts_the_chinese_label_and_sends_the_canonical_key(policy) -> None:
+    client = FakeClient(ACTIVE)
+    decision = make_processor(client, policy).process(message(f"/bind {BOUNTY} 搜索并救援"))
+    assert (
+        "bind",
+        "qqbot",
+        "user-openid",
+        BOUNTY,
+        ("RescueBountyResc",),
+    ) in client.calls
+    assert "搜索并救援" in (decision.reply or "")
+
+
+def test_bind_deduplicates_a_label_and_its_key(policy) -> None:
+    client = FakeClient(ACTIVE)
+    make_processor(client, policy).process(message(f"/bind {BOUNTY} 搜索并救援,RescueBountyResc"))
+    assert (
+        "bind",
+        "qqbot",
+        "user-openid",
+        BOUNTY,
+        ("RescueBountyResc",),
+    ) in client.calls
+
+
+def test_bind_accepts_a_lowercase_key(policy) -> None:
+    client = FakeClient(ACTIVE)
+    make_processor(client, policy).process(message(f"/bind {BOUNTY} rescuebountyresc"))
+    assert (
+        "bind",
+        "qqbot",
+        "user-openid",
+        BOUNTY,
+        ("RescueBountyResc",),
+    ) in client.calls
+
+
+def test_bind_rejects_an_unknown_label(policy) -> None:
+    client = FakeClient(ACTIVE)
+    decision = make_processor(client, policy).process(message(f"/bind {BOUNTY} 不存在的任务"))
+    assert "不在该事件的可选范围内" in (decision.reply or "")
+    assert not [call for call in client.calls if call[0] == "bind"]
+
+
 def test_bind_requires_watch_keys_when_the_catalog_demands_them(policy) -> None:
     client = FakeClient(ACTIVE)
     decision = make_processor(client, policy).process(message(f"/bind {BOUNTY}"))
@@ -96,7 +140,7 @@ def test_bindings_shows_watched_keys(policy) -> None:
     ]
     decision = make_processor(client, policy).process(message("/bindings"))
     reply = decision.reply or ""
-    assert f"- {BOUNTY}：关注 RescueBountyResc" in reply
+    assert f"- {BOUNTY}：关注 搜索并救援" in reply
     assert "- demo.event.changed：关注全部" in reply
 
 

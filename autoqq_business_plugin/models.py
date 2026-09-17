@@ -77,6 +77,22 @@ class EventInfo:
                 return option.label
         return None
 
+    def match_key_for(self, token: str) -> str | None:
+        """Resolve a user-typed watch token to a catalogue key.
+
+        Users may type the canonical key or the catalogue label; labels are
+        unique within one event, so the mapping stays deterministic. The
+        canonical key is what gets sent to EventServer.
+        """
+        for option in self.match_key_options:
+            if option.key == token:
+                return option.key
+        lowered = token.lower()
+        for option in self.match_key_options:
+            if option.key.lower() == lowered or option.label.lower() == lowered:
+                return option.key
+        return None
+
 
 @dataclass(frozen=True)
 class SubscriptionInfo:

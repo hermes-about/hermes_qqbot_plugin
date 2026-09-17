@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "autoqq-business-plugin"
-version = "0.2.0"
+version = "0.2.1"
 description = "Deterministic AutoQQ authorization, command, and delivery plugin for Hermes"
 readme = "README.md"
 requires-python = ">=3.12"

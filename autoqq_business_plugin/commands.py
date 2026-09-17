@@ -2,7 +2,7 @@ import re
 from collections.abc import Callable
 
 from .command_policy import CommandPolicyRegistry
-from .eventserver_client import EventServerClient, EventServerResponseError
+from .eventserver_client import EventServerClient, EventServerError, EventServerResponseError
 from .models import EventInfo, MessageIdentity, ParsedCommand, PermissionSnapshot
 from .observability import mask_identifier
 from .permission_cache import PermissionCache
@@ -91,19 +91,21 @@ class CommandService:
         if not args:
             raise CommandUsageError("用法：/bind <event_key> [关注项...]")
         event_key = args[0]
-        requested = self._match_key_tokens(args[1:])
+        tokens = self._match_key_tokens(args[1:])
         event = self._find_event(self._client.list_events(), event_key)
         if event is not None:
-            unknown = [key for key in requested if event.option_label(key) is None]
+            requested, unknown = self._resolve_match_keys(event, tokens)
             if unknown:
                 return (
                     f"关注项不在该事件的可选范围内：{unknown[0]}。"
-                    f"发送 /events {event.event_key} 查看可选值。"
+                    f"发送 /events {event.event_key} 查看可选值（可写任务键或中文名）。"
                 )
             if event.match_keys_required and not requested:
                 raise CommandUsageError(
                     f"该事件必须指定至少一个关注项。用法：/bind {event.event_key} <关注项[,关注项]>"
                 )
+        else:
+            requested = tokens
         try:
             result = self._client.subscribe(
                 identity.platform, identity.openid, event_key, requested
@@ -134,10 +136,19 @@ class CommandService:
         items = self._client.list_subscriptions(identity.platform, identity.openid)
         if not items:
             return "当前没有订阅。"
+        try:
+            events = self._client.list_events()
+        except EventServerError:
+            events = []
         lines = []
         for item in items:
+            event = self._find_event(events, item.event_key)
             if item.match_keys:
-                lines.append(f"- {item.event_key}：关注 {'、'.join(item.match_keys)}")
+                names = "、".join(
+                    (event.option_label(key) or key) if event is not None else key
+                    for key in item.match_keys
+                )
+                lines.append(f"- {item.event_key}：关注 {names}")
             else:
                 lines.append(f"- {item.event_key}：关注全部")
         return "当前订阅：\n" + "\n".join(lines)
@@ -251,7 +262,7 @@ class CommandService:
         requirement = "绑定时必须指定至少一项" if event.match_keys_required else "不指定表示全部"
         lines = [f"{event.event_key}（{event.display_name}）可关注任务，{requirement}："]
         lines.extend(f"- {option.key}：{option.label}" for option in event.match_key_options)
-        lines.append(f"用法：/bind {event.event_key} <关注项[,关注项]>")
+        lines.append(f"用法：/bind {event.event_key} <关注项[,关注项]>（任务键或中文名）")
         return "\n".join(lines)
 
     @staticmethod
@@ -271,6 +282,21 @@ class CommandService:
         if result.changed:
             return f"已订阅 {result.event_key}，关注 {watched}。"
         return f"已经订阅 {result.event_key}，关注项未变化：{watched}。"
+
+    @staticmethod
+    def _resolve_match_keys(
+        event: EventInfo, tokens: tuple[str, ...]
+    ) -> tuple[tuple[str, ...], list[str]]:
+        """Map user tokens (catalogue key or label) to canonical keys."""
+        resolved: list[str] = []
+        unknown: list[str] = []
+        for token in tokens:
+            key = event.match_key_for(token)
+            if key is None:
+                unknown.append(token)
+            elif key not in resolved:
+                resolved.append(key)
+        return tuple(resolved), unknown
 
     @staticmethod
     def _match_key_tokens(args: tuple[str, ...]) -> tuple[str, ...]:

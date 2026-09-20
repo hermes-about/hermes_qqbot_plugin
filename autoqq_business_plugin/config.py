@@ -61,6 +61,13 @@ class Settings:
     delivery_send_timeout_seconds: float = 20.0
     delivery_max_message_chars: int = 2000
     default_timezone: str = "Asia/Shanghai"
+    query_service_url: str = ""
+    query_service_token: str = ""
+    query_connect_timeout_seconds: float = 2.0
+    query_read_timeout_seconds: float = 4.0
+    query_max_response_bytes: int = 65_536
+    query_catalog_ttl_seconds: float = 300.0
+    query_reply_max_chars: int = 1200
 
     @classmethod
     def from_env(cls, source: dict[str, str] | None = None) -> "Settings":
@@ -80,6 +87,22 @@ class Settings:
             raise ConfigurationError(
                 "DELIVERY_WORKER_ID is required when delivery polling is enabled"
             )
+        query_url = env.get("QUERY_SERVICE_URL", "").strip().rstrip("/")
+        query_token = env.get("QUERY_SERVICE_TOKEN", "").strip()
+        if query_url:
+            parsed_query = urlsplit(query_url)
+            if (
+                parsed_query.scheme not in {"http", "https"}
+                or not parsed_query.netloc
+                or parsed_query.username
+            ):
+                raise ConfigurationError(
+                    "QUERY_SERVICE_URL must be an absolute HTTP(S) URL without userinfo"
+                )
+            if len(query_token) < 32:
+                raise ConfigurationError("QUERY_SERVICE_TOKEN must contain at least 32 characters")
+        elif query_token:
+            raise ConfigurationError("QUERY_SERVICE_TOKEN requires QUERY_SERVICE_URL")
         return cls(
             event_server_url=base_url,
             internal_api_token=token,
@@ -107,4 +130,13 @@ class Settings:
             default_timezone=(
                 env.get("DEFAULT_TIMEZONE", "Asia/Shanghai").strip() or "Asia/Shanghai"
             ),
+            query_service_url=query_url,
+            query_service_token=query_token,
+            query_connect_timeout_seconds=_number(env, "QUERY_CONNECT_TIMEOUT_SECONDS", 2, 0.1),
+            query_read_timeout_seconds=_number(env, "QUERY_READ_TIMEOUT_SECONDS", 4, 0.1),
+            query_max_response_bytes=_integer(
+                env, "QUERY_MAX_RESPONSE_BYTES", 65_536, 1024, 4_194_304
+            ),
+            query_catalog_ttl_seconds=_number(env, "QUERY_CATALOG_TTL_SECONDS", 300, 0),
+            query_reply_max_chars=_integer(env, "QUERY_REPLY_MAX_CHARS", 1200, 200, 4000),
         )

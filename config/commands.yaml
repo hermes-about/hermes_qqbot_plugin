@@ -11,6 +11,7 @@
     "/admin": "admin",
     "/unadmin": "admin",
     "/permissions": "admin",
-    "/userlist": "admin"
+    "/userlist": "admin",
+    "/wf": "public"
   }
 }

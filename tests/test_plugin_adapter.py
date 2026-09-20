@@ -93,3 +93,25 @@ def test_non_qq_platform_does_not_start_delivery_worker() -> None:
         assert value.worker.started == 0
 
     asyncio.run(scenario())
+
+
+def test_runtime_wires_the_query_service_and_catalogue() -> None:
+    configured = Settings(
+        "http://eventserver",
+        "x" * 32,
+        delivery_worker_id="worker",
+        query_service_url="http://wfdata-publisher:8081",
+        query_service_token="q" * 32,
+    )
+    value = PluginRuntime(configured)
+    try:
+        assert value.query_client is not None
+        assert value.processor._commands._queries.for_command("/wf") is not None
+    finally:
+        value.close()
+
+    plain = PluginRuntime(Settings("http://eventserver", "x" * 32, delivery_worker_id="worker"))
+    try:
+        assert plain.query_client is None
+    finally:
+        plain.close()

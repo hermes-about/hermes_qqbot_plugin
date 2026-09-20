@@ -1,20 +1,126 @@
 import re
 from collections.abc import Callable
+from functools import partial
 
 from .command_policy import CommandPolicyRegistry
 from .eventserver_client import EventServerClient, EventServerError, EventServerResponseError
-from .models import EventInfo, MessageIdentity, ParsedCommand, PermissionSnapshot
+from .models import (
+    AccessPolicy,
+    EventInfo,
+    MessageIdentity,
+    ParsedCommand,
+    PermissionSnapshot,
+    QueryAction,
+    QueryInfo,
+    QueryNamespace,
+    QueryParam,
+    QueryResult,
+    QueryTarget,
+)
 from .observability import mask_identifier
 from .permission_cache import PermissionCache
+from .query_catalog import QueryCatalog
+from .query_client import (
+    QueryServiceClient,
+    QueryServiceError,
+    QueryServiceResponseError,
+)
+from .query_params import assign as assign_query_params
+from .query_params import normalise_tokens
+from .query_params import usage as query_usage
+from .query_params import validate as validate_query_params
 
 _PAIRING_CODE = re.compile(r"^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$")
 _EXPLICIT_OPENID = re.compile(r"^[A-Za-z0-9._:-]{6,128}$")
 _DIMENSIONS = {"chat": ["chat"], "command": ["command"], "all": ["chat", "command"]}
 _MAX_MATCH_KEYS = 32
+_DEFAULT_QUERY_REPLY_MAX_CHARS = 1200
+
+_COMMAND_HELP: dict[str, str] = {
+    "/help": "用法：/help 或 /help <命令>\n列出可用命令，或查看某个命令的用法与可选项。",
+    "/events": (
+        "用法：/events 或 /events <event_key>\n"
+        "不带参数列出可订阅事件；带事件键时列出该事件的可关注项。"
+    ),
+    "/whoami": "用法：/whoami\n显示自己的脱敏 OpenID、账号状态、角色和权限。",
+    "/bind": (
+        "用法：/bind <event_key> [关注项...]\n"
+        "订阅事件，可指定关注项；关注项可写任务键或中文名，多个用空格或逗号分隔。\n"
+        "发送 /events <event_key> 查看该事件的可关注项。"
+    ),
+    "/unbind": "用法：/unbind <event_key>\n取消订阅；重复执行是幂等的。",
+    "/bindings": "用法：/bindings\n列出当前订阅及其关注项。",
+    "/grant": (
+        "用法：/grant <目标|pairing_code> chat|command|all\n"
+        "授予权限，必须显式指定 chat、command 或 all。"
+    ),
+    "/revoke": (
+        "用法：/revoke <目标> chat|command|all\n撤销权限；撤销 command 后订阅保留但暂停投递。"
+    ),
+    "/admin": "用法：/admin <目标>\n把目标设为管理员，不会自动授予 chat 或 command。",
+    "/unadmin": "用法：/unadmin <目标>\n移除目标的管理员角色，不会改动权限。",
+    "/permissions": "用法：/permissions <目标>\n查看目标的账号状态、角色和权限。",
+    "/userlist": "用法：/userlist\n当前 EventServer v1 未提供用户列表接口，命令会安全终止。",
+    "/wf": (
+        "用法：/wf <领域> [指令] [参数...]\n"
+        "查询 Warframe 实时数据；领域、指令和参数由受控查询目录定义，"
+        "发送 /wf help 查看当前可用的领域。"
+    ),
+}
+
+_POLICY_LABELS: tuple[tuple[AccessPolicy, str], ...] = (
+    (AccessPolicy.PUBLIC, "公开"),
+    (AccessPolicy.AUTHORIZED, "需要 command 权限"),
+    (AccessPolicy.ADMIN, "管理员"),
+)
 
 
 class CommandUsageError(ValueError):
     pass
+
+
+def _split_action(
+    info: QueryInfo | None, tokens: tuple[str, ...]
+) -> tuple[QueryAction | None, tuple[str, ...]]:
+    """Consume an optional action token; the default action absorbs everything else."""
+    if info is None:
+        return None, tokens
+    if not info.actions or not tokens:
+        return info.default_action(), tokens
+    action = info.action_for(tokens[0])
+    if action is None:
+        return info.default_action(), tokens
+    return action, tokens[1:]
+
+
+def _param_summary(info: QueryInfo) -> str:
+    params = info.action_params(info.default_action())
+    return "、".join(
+        f"{param.label}{'（必填）' if param.required else '（可选）'}" for param in params
+    )
+
+
+def _param_line(param: QueryParam) -> str:
+    details = ["必填" if param.required else "可选"]
+    if param.default:
+        details.append(f"默认 {param.default}")
+    if param.multiple:
+        details.append(f"可多选，最多 {param.max_items} 项" if param.max_items else "可多选")
+    if param.type == "enum":
+        if len(param.options) <= 6:
+            details.append("取值：" + "、".join(_option_text(option) for option in param.options))
+        else:
+            details.append(f"{len(param.options)} 项可选")
+    return f"{param.label}（{'，'.join(details)}）"
+
+
+def _option_text(option) -> str:
+    return option.label if option.label == option.key else f"{option.label}（{option.key}）"
+
+
+def _action_summary(info: QueryInfo) -> str:
+    names = [item.label or item.key for item in info.actions if not item.default]
+    return "、".join(names)
 
 
 class CommandService:
@@ -24,11 +130,17 @@ class CommandService:
         cache: PermissionCache,
         policies: CommandPolicyRegistry,
         mention_resolver: Callable[[str, MessageIdentity], str | None] | None = None,
+        query_catalog: QueryCatalog | None = None,
+        query_service: QueryServiceClient | None = None,
+        query_reply_max_chars: int = _DEFAULT_QUERY_REPLY_MAX_CHARS,
     ) -> None:
         self._client = client
         self._cache = cache
         self._policies = policies
         self._mention_resolver = mention_resolver or (lambda _token, _identity: None)
+        self._queries = query_catalog or QueryCatalog.empty()
+        self._query_service = query_service
+        self._query_reply_max_chars = query_reply_max_chars
 
     def execute(
         self,
@@ -36,7 +148,9 @@ class CommandService:
         identity: MessageIdentity,
         actor: PermissionSnapshot,
     ) -> str:
-        handlers = {
+        if self._wants_help(command):
+            return self.help_text(command.name)
+        handlers: dict[str, Callable[..., str]] = {
             "/help": self._help,
             "/events": self._events,
             "/whoami": self._whoami,
@@ -50,18 +164,19 @@ class CommandService:
             "/permissions": self._permissions,
             "/userlist": self._userlist,
         }
-        return handlers[command.name](command.args, identity, actor)
+        for namespace in self._queries.namespaces():
+            handlers[namespace.command] = partial(self._run_query, namespace)
+        handler = handlers.get(command.name)
+        if handler is None:
+            raise CommandUsageError("未知命令。发送 /help 查看可用命令。")
+        return handler(command.args, identity, actor)
 
     def _help(self, args: tuple[str, ...], *_: object) -> str:
-        self._expect(args, 0, "/help")
-        return (
-            "可用命令：\n"
-            "/events\n/events <event_key>\n/bind <event_key> [关注项...]\n"
-            "/unbind <event_key>\n/bindings\n"
-            "/whoami\n/help\n"
-            "管理员：/grant <目标|pairing_code> chat|command|all、/revoke、"
-            "/admin、/unadmin、/permissions、/userlist"
-        )
+        if len(args) > 1:
+            raise CommandUsageError("用法：/help 或 /help <命令>")
+        if args:
+            return self.help_text(self._command_name(args[0]))
+        return self._command_overview()
 
     def _events(self, args: tuple[str, ...], *_: object) -> str:
         if len(args) > 1:
@@ -216,6 +331,181 @@ class CommandService:
     def _userlist(self, args: tuple[str, ...], *_: object) -> str:
         self._expect(args, 0, "/userlist")
         return "当前 EventServer v1 尚未提供用户列表接口；命令已安全终止，未进入 LLM。"
+
+    def _command_overview(self) -> str:
+        lines = ["可用命令："]
+        for policy, label in _POLICY_LABELS:
+            names = [
+                name for name in self._policies.names() if self._policies.policy_for(name) is policy
+            ]
+            if not names:
+                continue
+            if policy is AccessPolicy.ADMIN:
+                lines.append(f"{label}：" + "、".join(names) + "（发送 /<命令> help 查看用法）")
+            else:
+                lines.append(f"{label}：" + "、".join(self._command_usage(name) for name in names))
+        lines.append("发送 /<命令> help 或 /help <命令> 查看用法与可选项。")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _command_usage(name: str) -> str:
+        text = _COMMAND_HELP.get(name, "")
+        first = text.splitlines()[0] if text else ""
+        if first.startswith("用法："):
+            return first[len("用法：") :].strip()
+        return name
+
+    @staticmethod
+    def _wants_help(command: ParsedCommand) -> bool:
+        return len(command.args) == 1 and command.args[0].lower() == "help"
+
+    @staticmethod
+    def _command_name(token: str) -> str:
+        value = token.strip().lower()
+        return value if value.startswith("/") else f"/{value}"
+
+    def help_text(self, name: str) -> str:
+        namespace = self._queries.for_command(name)
+        if namespace is not None:
+            return self._query_help(namespace)
+        text = _COMMAND_HELP.get(name)
+        if text is None:
+            return f"没有找到命令 {name}。发送 /help 查看可用命令。"
+        return text
+
+    def _run_query(
+        self,
+        namespace: QueryNamespace,
+        args: tuple[str, ...],
+        _identity: MessageIdentity,
+        _actor: PermissionSnapshot,
+    ) -> str:
+        if not args:
+            raise CommandUsageError(
+                f"用法：{namespace.command} <领域> [指令] [参数...]；"
+                f"发送 {namespace.command} help 查看可用领域。"
+            )
+        target = namespace.resolve(args[0])
+        if target is None:
+            return f"没有找到领域 {args[0]}。发送 {namespace.command} help 查看可用领域。"
+        rest = args[1:]
+        if len(rest) == 1 and rest[0].lower() == "help":
+            return self._query_target_help(namespace, target)
+        if self._query_service is None:
+            return "查询服务未启用，请联系管理员。"
+        info = self._query_info(target)
+        action, tokens = _split_action(info, rest)
+        params = info.action_params(action) if info is not None else ()
+        hint = f"发送 {namespace.command} {target.aliases[0]} help 查看用法与参数。"
+        try:
+            normalised = normalise_tokens(tokens)
+        except ValueError:
+            return f"参数过多。{hint}"
+        values, error = validate_query_params(params, assign_query_params(params, normalised))
+        if error:
+            return f"{error}。{hint}"
+        try:
+            result = self._query_service.fetch(target.query_key, values)
+        except QueryServiceResponseError as exc:
+            return self._query_error_reply(exc, hint)
+        except QueryServiceError:
+            return "查询服务暂时不可用，请稍后再试。"
+        return self._format_query_reply(result, target, filtered=any(values.values()))
+
+    def _query_help(self, namespace: QueryNamespace) -> str:
+        lines = [f"{namespace.command}：{namespace.display_name}"]
+        if namespace.description:
+            lines.append(namespace.description)
+        lines.append(f"用法：{namespace.command} <领域> [指令] [参数...]")
+        catalog = self._query_catalog_entries()
+        lines.append("领域：")
+        for target in namespace.targets:
+            info = catalog.get(target.query_key) if catalog else None
+            title = info.display_name if info is not None else target.query_key
+            lines.append(f"- {'、'.join(target.aliases)}：{title}")
+            if info is not None:
+                summary = _param_summary(info)
+                if summary:
+                    lines.append(f"  参数：{summary}")
+        if self._query_service is None:
+            lines.append("（本部署未配置查询服务，查询请求会被拒绝）")
+        elif catalog is None:
+            lines.append("（查询服务暂时不可用，未能列出参数可选项）")
+        example = namespace.targets[0].aliases[0] if namespace.targets[0].aliases else ""
+        lines.append(f"示例：{namespace.command} {example}".rstrip())
+        return "\n".join(lines)
+
+    def _query_target_help(self, namespace: QueryNamespace, target: QueryTarget) -> str:
+        info = self._query_info(target)
+        alias = target.aliases[0] if target.aliases else target.query_key
+        lines = [f"{namespace.command} {alias}：{info.display_name if info else target.query_key}"]
+        if info is not None and info.description:
+            lines.append(info.description)
+        action = info.default_action() if info is not None else None
+        params = info.action_params(action) if info is not None else ()
+        label = (action.label or action.key) if action is not None else ""
+        if label and info is not None and len(info.actions) > 1:
+            lines.append(f"指令：{label}（默认），可选 {_action_summary(info)}")
+        elif label:
+            lines.append(f"指令：{label}（默认，可省略）")
+        if params:
+            lines.append(f"用法：{namespace.command} {alias} {query_usage(params)}")
+            lines.append("参数：")
+            for param in params:
+                lines.append(f"- {_param_line(param)}")
+                if param.type == "enum" and len(param.options) > 6:
+                    lines.extend(f"  · {option.key}：{option.label}" for option in param.options)
+            lines.append("也可写成「参数名=值」，例如 weapon=Dual Toxocyst。")
+        else:
+            lines.append("当前没有可筛选的参数，直接查询即可。")
+            lines.append(f"用法：{namespace.command} {alias}")
+        return "\n".join(lines)
+
+    def _query_info(self, target: QueryTarget) -> QueryInfo | None:
+        catalog = self._query_catalog_entries()
+        return catalog.get(target.query_key) if catalog else None
+
+    def _query_catalog_entries(self) -> dict[str, QueryInfo] | None:
+        if self._query_service is None:
+            return None
+        try:
+            return self._query_service.catalog()
+        except QueryServiceError:
+            return None
+
+    @staticmethod
+    def _query_error_reply(exc: QueryServiceResponseError, hint: str = "") -> str:
+        if exc.status_code == 400:
+            labels = "、".join(option.label for option in exc.options)
+            detail = exc.message or "参数未被接受"
+            base = f"{detail}。可选：{labels}。" if labels else f"{detail}。"
+            return f"{base} {hint}".strip()
+        if exc.status_code == 404 and exc.message:
+            return f"{exc.message} {hint}".strip()
+        if exc.status_code in {502, 503, 504}:
+            return "上游数据源暂时不可用，请稍后再试。"
+        if exc.status_code == 404:
+            return "查询目标不存在，请联系管理员。"
+        return "查询失败，请联系管理员。"
+
+    def _format_query_reply(
+        self, result: QueryResult, target: QueryTarget, *, filtered: bool
+    ) -> str:
+        """Render the answer for the current channel.
+
+        A target configured with `reply: image_url` answers a plain query with the
+        image URL only. A filtered query keeps the text form, because the image
+        cannot show which tasks were selected, and a missing URL falls back to
+        text instead of sending an empty message.
+        """
+        if target.reply == "image_url" and result.image_url and not filtered:
+            return result.image_url
+        text = result.text.strip()
+        if len(text) > self._query_reply_max_chars:
+            text = text[: self._query_reply_max_chars] + "…"
+        if not result.image_url:
+            return text
+        return f"{text}\n图片：{result.image_url}"
 
     def _target(self, token: str, identity: MessageIdentity) -> str:
         if token.startswith("@"):

@@ -1,0 +1,20 @@
+{
+  "namespaces": {
+    "wf": {
+      "display_name": "Warframe 数据查询",
+      "description": "按需查询 Warframe 世界状态与轮换数据，数据由只读查询服务提供。",
+      "targets": [
+        {
+          "query_key": "warframe.cetus.bounties",
+          "aliases": ["地球", "cetus", "希图斯", "夜灵平原"],
+          "reply": "image_url"
+        },
+        {
+          "query_key": "warframe.riven.summary",
+          "aliases": ["紫卡", "riven", "裂罅"],
+          "reply": "text"
+        }
+      ]
+    }
+  }
+}

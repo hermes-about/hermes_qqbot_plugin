@@ -63,6 +63,20 @@ def test_command_parser_keeps_malformed_slash_messages_out_of_llm() -> None:
     assert parse_command("/BAD!").name == ""
 
 
+def test_command_parser_honours_quotes_for_free_text_parameters() -> None:
+    assert parse_command('/wf 紫卡 weapon="Torid Prime"').args == (
+        "紫卡",
+        "weapon=Torid Prime",
+    )
+    assert parse_command('/wf 紫卡 "Dual Toxocyst" 3P').args == (
+        "紫卡",
+        "Dual Toxocyst",
+        "3P",
+    )
+    assert parse_command("/wf 紫卡 “托里德”").args == ("紫卡", "托里德")
+    assert parse_command('/wf 紫卡 "托里德').args == ("紫卡", "托里德")
+
+
 def test_privileged_command_cannot_be_public(tmp_path: Path) -> None:
     path = tmp_path / "commands.yaml"
     path.write_text('{"commands":{"/grant":"public"}}', encoding="utf-8")

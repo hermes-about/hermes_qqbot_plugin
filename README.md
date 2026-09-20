@@ -14,6 +14,7 @@ Plugin 不连接 MySQL、不采集事件源，也不持有 QQ App 凭据。用�
 - 在 LLM 前确定性处理命令；已处理命令不会进入 LLM。
 - 为未知用户申请一次性 pairing code。
 - 管理用户授权、角色与事件订阅。
+- 通过受控目录向只读查询服务请求按需数据（如 `/wf 地球`），回复后同样跳过 LLM。
 - 轮询 EventServer delivery，主动向用户 QQ 私聊并回写 `ack` 或 `fail`。
 - EventServer 不可用、响应异常或用户被封禁时默认拒绝，不降级为放行。
 
@@ -31,6 +32,7 @@ EventServer delivery -> Plugin 领取 -> Hermes QQBot 主动私聊 -> ack/fail
 - Hermes Gateway 已配置并连接 QQBot。
 - AutoQQ EventServer 已完成迁移、启动并处于 `ready` 状态。
 - Hermes 与 EventServer 加入同一个 Docker 网络。
+- 需要按需查询命令时，Hermes 还要能访问查询服务（默认 `autoqq-wfdata-publisher:8081`）。
 - Hermes 持久数据目录可写；本文以容器内 `/opt/data` 为例。
 - Hermes Python 环境包含 `httpx>=0.28,<1`。
 - EventServer 与 Plugin 使用同一个 `INTERNAL_API_TOKEN`。
@@ -67,6 +69,17 @@ PERMISSION_CACHE_TTL_SECONDS=30
 COMMAND_RATE_LIMIT_COUNT=10
 COMMAND_RATE_LIMIT_WINDOW_SECONDS=60
 DEFAULT_TIMEZONE=Asia/Shanghai
+
+# 可选：只读查询服务（wf-data Publisher 的查询端点），用于 /wf 等按需查询命令。
+# 不配置时 /wf 仍会注册，但会回复「查询服务未启用」。Token 必须与部署侧的
+# WFDATA_QUERY_API_TOKEN 完全一致。
+#QUERY_SERVICE_URL=http://autoqq-wfdata-publisher:8081
+#QUERY_SERVICE_TOKEN=<至少32位随机字符>
+QUERY_CONNECT_TIMEOUT_SECONDS=2
+QUERY_READ_TIMEOUT_SECONDS=4
+QUERY_MAX_RESPONSE_BYTES=65536
+QUERY_CATALOG_TTL_SECONDS=300
+QUERY_REPLY_MAX_CHARS=1200
 ```
 
 限制文件权限：
@@ -206,6 +219,11 @@ docker logs --since 10m hermes
 | `/unadmin <目标>` | admin | 移除管理员角色 |
 | `/permissions <目标>` | admin | 查看目标权限 |
 | `/userlist` | admin | 当前 EventServer v1 暂未提供列表接口，命令会安全终止 |
+| `/wf <主题> [参数...]` | public | 按需查询 Warframe 实时数据，如 `/wf 地球`；主题与参数来自受控查询目录 |
+
+所有命令都支持 `/<命令> help`（等价写法 `/help <命令>`）查看用法与可选项，例如
+`/wf help`、`/wf 地球 help`、`/bind help`。帮助与正常执行一样先经过命令策略校验，
+管理员命令的帮助只对管理员可见，并且确定性跳过 LLM。
 
 `public` 表示无需预先授权，不表示绕过身份检查。显式封禁用户不能使用 public 命令；
 EventServer 不可用时 public 命令也会失败关闭。无法可靠解析 `@昵称` 时，应使用 pairing code
@@ -222,6 +240,49 @@ EventServer 不可用时 public 命令也会失败关闭。无法可靠解析 `@
 关注项既可以写目录里的任务键（如 `RescueBountyResc`），也可以写中文名（如 `搜索并救援`），
 大小写不敏感；Plugin 把它们确定性映射成任务键后再提交给 EventServer，服务端只接受目录里
 声明的键。`/bindings` 会显示中文名（目录不可用时回退为任务键）。
+
+### 按需查询
+
+`/wf` 是查询命令的命名空间，可用于「现在就想看一眼」而不必先订阅。它按
+「命令 / 领域 / 指令 / 参数」四段组织，其中指令可以省略：
+
+```text
+/<命令> <领域> [<指令>] <参数...>
+/wf     地球                     -> 只回复赏金图链接
+/wf     地球 搜索并救援           -> 筛选后的文本 + 图片链接
+/wf     紫卡 托里德               -> 该武器 3P1N 结构下全部词条上下限
+/wf     紫卡 托里德 3P            -> 指定紫卡结构
+/wf     紫卡 词条 托里德 3+1       -> 显式指令（词条）+ 结构别名
+/wf     紫卡 "Dual Toxocyst" 3P   -> 带空格的武器名用引号包起来
+```
+
+主题别名写在 `config/queries.yaml`（受控文件，随部署维护），每个主题指向只读查询服务声明
+的稳定 `query_key`；参数名称、必填/可选、取值枚举都由服务端目录给出，Plugin 不做任何猜测：
+
+```text
+/wf help        # 列出领域与每个领域的参数
+/wf 紫卡 help    # 列出指令、参数、必填项与取值枚举
+```
+
+链路：
+
+```text
+/wf 地球 -> Plugin 解析别名 -> GET {QUERY_SERVICE_URL}/v1/queries/cetus-bounties
+         -> 渠道无关文本 + image_url -> QQ 文本回复（当前适配器只支持文本，图片以链接给出）
+```
+
+主题可以在 `config/queries.yaml` 里声明 `"reply": "image_url"`：无参数查询直接回复图片链接本体，
+不带标题和前缀。带参数筛选时仍回复文本加图片链接（图片无法体现筛选结果），服务没返回图片链接时
+也会回退成文本，避免发出空消息。默认值 `"reply": "text"` 表示始终回复文本。
+
+参数可以按位置书写，也可以写成 `参数名=值`（值含空格时用引号）；枚举参数接受目录里的键、
+中文名或别名（例如 `3+1` 等价于 `3P1N`）。参数不在目录范围内、必填项缺失、参数过多都会在
+Plugin 侧直接拒绝，不会打到查询服务。
+
+查询不创建订阅或 delivery，也不会进入 LLM。上游不可用时回复固定降级文案；未配置
+`QUERY_SERVICE_URL` 时命令仍然注册，但会明确回复「查询服务未启用」。查询请求同样受
+`COMMAND_RATE_LIMIT_*` 限流，查询服务侧对 wf-data 的响应有 30 秒缓存，用户请求不会直接
+放大成上游压力。
 
 ## 事件通知
 
@@ -269,6 +330,8 @@ docker compose up -d --force-recreate hermes-gateway
 | 一直领取不到通知 | 检查 `DELIVERY_POLL_ENABLED`、稳定 worker ID、用户 `command` 权限和订阅 |
 | delivery 持续 retry | 检查 Hermes QQBot 连接、发送限制和 EventServer 的脱敏错误码 |
 | 通知偶尔重复 | 这是发送成功但 `ack` 前退出时的至少一次投递边界 |
+| `/wf` 回复「查询服务未启用」 | 检查 Plugin 的 `QUERY_SERVICE_URL`、`QUERY_SERVICE_TOKEN`，以及 Publisher 的 `QUERY_API_TOKEN` 是否一致 |
+| `/wf` 回复「查询服务暂时不可用」 | 检查 wf-data Publisher 是否加入 `hermes_net`、`8081` 是否监听、能否访问 wf-data |
 
 ## 参考文档
 

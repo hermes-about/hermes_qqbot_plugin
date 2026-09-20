@@ -14,6 +14,8 @@ from .hermes_sender import GatewaySender
 from .identity import extract_identity
 from .permission_cache import PermissionCache
 from .processor import MessageProcessor
+from .query_catalog import QueryCatalog, QueryCatalogError
+from .query_client import QueryServiceClient
 from .rate_limit import SlidingWindowRateLimiter
 
 logger = logging.getLogger("autoqq.plugin")
@@ -37,11 +39,37 @@ class PluginRuntime:
         source_policy = _PLUGIN_ROOT / "config" / "commands.yaml"
         policy_path = packaged_policy if packaged_policy.is_file() else source_policy
         policies = CommandPolicyRegistry.from_file(policy_path)
+        packaged_queries = Path(__file__).resolve().parent / "config" / "queries.yaml"
+        source_queries = _PLUGIN_ROOT / "config" / "queries.yaml"
+        queries_path = packaged_queries if packaged_queries.is_file() else source_queries
+        try:
+            query_catalog = QueryCatalog.from_file(queries_path)
+        except QueryCatalogError:
+            logger.exception("autoqq query catalogue is invalid; query commands stay unavailable")
+            query_catalog = QueryCatalog.empty()
+        query_service = None
+        if settings.query_service_url:
+            query_service = QueryServiceClient(
+                settings.query_service_url,
+                settings.query_service_token,
+                connect_timeout=settings.query_connect_timeout_seconds,
+                read_timeout=settings.query_read_timeout_seconds,
+                max_response_bytes=settings.query_max_response_bytes,
+                catalog_ttl_seconds=settings.query_catalog_ttl_seconds,
+            )
         cache = PermissionCache(settings.permission_cache_ttl_seconds)
         limiter = SlidingWindowRateLimiter(
             settings.command_rate_limit_count, settings.command_rate_limit_window_seconds
         )
-        commands = CommandService(self.client, cache, policies)
+        self.query_client = query_service
+        commands = CommandService(
+            self.client,
+            cache,
+            policies,
+            query_catalog=query_catalog,
+            query_service=query_service,
+            query_reply_max_chars=settings.query_reply_max_chars,
+        )
         self.processor = MessageProcessor(self.client, policies, cache, limiter, commands)
         self.sender = GatewaySender(settings.delivery_send_timeout_seconds)
         self.worker = DeliveryWorker(
@@ -83,6 +111,8 @@ class PluginRuntime:
             return
         self._closed = True
         self.worker.stop()
+        if self.query_client is not None:
+            self.query_client.close()
         self.client.close()
 
     def bind_qqbot_adapter(self, _native: Any, adapter: Any) -> None:

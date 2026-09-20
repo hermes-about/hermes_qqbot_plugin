@@ -108,8 +108,22 @@ def policy() -> CommandPolicyRegistry:
     return CommandPolicyRegistry.from_file(path)
 
 
-def make_processor(client: FakeClient, policy: CommandPolicyRegistry) -> MessageProcessor:
+def make_processor(
+    client: FakeClient,
+    policy: CommandPolicyRegistry,
+    *,
+    query_catalog=None,
+    query_service=None,
+    query_reply_max_chars: int = 1200,
+) -> MessageProcessor:
     cache = PermissionCache(30)
     limiter = SlidingWindowRateLimiter(100, 60)
-    commands = CommandService(client, cache, policy)
+    commands = CommandService(
+        client,
+        cache,
+        policy,
+        query_catalog=query_catalog,
+        query_service=query_service,
+        query_reply_max_chars=query_reply_max_chars,
+    )
     return MessageProcessor(client, policy, cache, limiter, commands)

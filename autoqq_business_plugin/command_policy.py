@@ -5,6 +5,7 @@ from pathlib import Path
 from .models import AccessPolicy, ParsedCommand
 
 _COMMAND_RE = re.compile(r"^(/[a-z][a-z0-9_-]*)(?:\s+(.+))?$", re.DOTALL)
+_QUOTES = {'"': '"', "'": "'", "“": "”", "‘": "’"}
 _ADMIN_COMMANDS = frozenset(
     {"/grant", "/revoke", "/admin", "/unadmin", "/permissions", "/userlist"}
 )
@@ -48,4 +49,35 @@ def parse_command(text: str) -> ParsedCommand | None:
     if match is None:
         return ParsedCommand(name="", args=())
     raw_args = match.group(2) or ""
-    return ParsedCommand(name=match.group(1).lower(), args=tuple(raw_args.split()))
+    return ParsedCommand(name=match.group(1).lower(), args=_tokenize(raw_args))
+
+
+def _tokenize(raw: str) -> tuple[str, ...]:
+    """Split command arguments on whitespace, honouring single or double quotes.
+
+    Quoting is what makes a free-text parameter such as a multi-word weapon name
+    expressible at all: `weapon="Torid Prime"` and `"Torid Prime"` both arrive as
+    one token, while every other command keeps plain whitespace splitting.
+    """
+    tokens: list[str] = []
+    current: list[str] = []
+    closing: str | None = None
+    for char in raw:
+        if closing is not None:
+            if char == closing:
+                closing = None
+            else:
+                current.append(char)
+            continue
+        if char in _QUOTES:
+            closing = _QUOTES[char]
+            continue
+        if char.isspace():
+            if current:
+                tokens.append("".join(current))
+                current = []
+            continue
+        current.append(char)
+    if current:
+        tokens.append("".join(current))
+    return tuple(tokens)

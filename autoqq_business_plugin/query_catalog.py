@@ -17,7 +17,7 @@ from .models import QueryNamespace, QueryTarget
 _NAMESPACE = re.compile(r"^[a-z][a-z0-9_-]*$")
 _QUERY_KEY = re.compile(r"^[a-z0-9][a-z0-9_.-]*$")
 _RESERVED_ALIASES = frozenset({"help"})
-_REPLY_MODES = frozenset({"text", "image_url"})
+_REPLY_MODES = frozenset({"text", "image_url", "image_url_always"})
 
 
 class QueryCatalogError(ValueError):

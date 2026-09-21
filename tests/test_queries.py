@@ -36,7 +36,7 @@ CATALOGUE = {
                 {
                     "query_key": RIVEN_KEY,
                     "aliases": ["紫卡", "riven"],
-                    "reply": "text",
+                    "reply": "image_url_always",
                 },
             ],
         }
@@ -129,6 +129,7 @@ class FakeQueryService:
                 "托里德 紫卡（3P1N）",
                 "托里德（Torid） 步枪 · 倾向 1.3\n3P1N（3正1负） · 满级 rank 8 · roll 0.9~1.1\n"
                 "正向词条（2）\n- 暴击几率 164.5~201.1%",
+                "https://example.invalid/redacted-riven-image.png",
             ),
         }
         self.catalog_error = catalog_error
@@ -227,8 +228,8 @@ def test_riven_query_uses_the_declared_default_shape(policy, tmp_path) -> None:
     service = FakeQueryService()
     decision = processor(service, policy, tmp_path).process(message("/wf 紫卡 托里德"))
     assert service.calls == [(RIVEN_KEY, {"weapon": ["托里德"], "shape": ["3P1N"]})]
-    assert "托里德（Torid） 步枪 · 倾向 1.3" in (decision.reply or "")
-    assert "- 暴击几率 164.5~201.1%" in (decision.reply or "")
+    assert decision.reply is None
+    assert decision.image_url == "https://example.invalid/redacted-riven-image.png"
 
 
 @pytest.mark.parametrize(

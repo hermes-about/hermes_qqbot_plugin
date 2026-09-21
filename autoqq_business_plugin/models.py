@@ -118,7 +118,7 @@ class QueryTarget:
     query_key: str
     aliases: tuple[str, ...] = ()
     reply: str = "text"
-    """Channel-neutral reply mode: `text` or `image_url` when the answer carries an image."""
+    """Reply mode: text, image_url for plain queries, or image_url_always."""
 
 
 @dataclass(frozen=True)

@@ -148,6 +148,28 @@ def test_query_catalogue_defaults_to_the_text_reply(tmp_path: Path) -> None:
     assert namespace.targets[0].reply == "text"
 
 
+def test_query_catalogue_accepts_image_reply_with_parameters(tmp_path: Path) -> None:
+    path = write_catalogue(
+        tmp_path,
+        {
+            "namespaces": {
+                "wf": {
+                    "targets": [
+                        {
+                            "query_key": QUERY_KEY,
+                            "aliases": ["紫卡"],
+                            "reply": "image_url_always",
+                        }
+                    ]
+                }
+            }
+        },
+    )
+    namespace = QueryCatalog.from_file(path).for_command("/wf")
+    assert namespace is not None
+    assert namespace.targets[0].reply == "image_url_always"
+
+
 @pytest.mark.parametrize(
     "namespaces",
     [

@@ -12,7 +12,7 @@
         {
           "query_key": "warframe.riven.summary",
           "aliases": ["紫卡", "riven", "裂罅"],
-          "reply": "text"
+          "reply": "image_url_always"
         }
       ]
     }

@@ -499,7 +499,10 @@ class CommandService:
         image cannot show which tasks were selected, and a missing URL falls
         back to text instead of sending an empty message.
         """
-        if target.reply == "image_url" and result.image_url and not filtered:
+        prefer_image = target.reply == "image_url_always" or (
+            target.reply == "image_url" and not filtered
+        )
+        if prefer_image and result.image_url:
             return CommandReply(image_url=result.image_url)
         text = result.text.strip()
         if len(text) > self._query_reply_max_chars:

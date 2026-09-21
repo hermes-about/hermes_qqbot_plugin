@@ -240,6 +240,20 @@ def test_fetch_without_parameters_sends_no_query_string() -> None:
     assert seen[1].url.query == b""
 
 
+@pytest.mark.parametrize("image_url", ["file:///etc/passwd", "/tmp/image.png", "not-a-url"])
+def test_query_result_rejects_non_http_image_sources(image_url: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/queries":
+            return response(200, CATALOGUE)
+        return response(
+            200,
+            {"query_key": QUERY_KEY, "title": "t", "text": "t", "image_url": image_url},
+        )
+
+    with pytest.raises(QueryServiceProtocolError):
+        client(handler).fetch(QUERY_KEY)
+
+
 def test_unknown_query_key_is_reported_without_a_second_guess() -> None:
     def handler(_request: httpx.Request) -> httpx.Response:
         return response(200, CATALOGUE)

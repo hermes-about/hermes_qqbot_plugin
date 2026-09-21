@@ -4,7 +4,7 @@ from .command_policy import CommandPolicyRegistry, parse_command
 from .commands import CommandService, CommandUsageError
 from .eventserver_client import EventServerError
 from .identity import IdentityError, extract_identity
-from .models import DispatchDecision, MessageIdentity, PermissionSnapshot
+from .models import CommandReply, DispatchDecision, MessageIdentity, PermissionSnapshot
 from .observability import audit
 from .permission_cache import PermissionCache
 from .rate_limit import SlidingWindowRateLimiter
@@ -75,13 +75,17 @@ class MessageProcessor:
             audit(logger, command.name, identity.platform, identity.openid, "rate-limited")
             return DispatchDecision("skip", "rate-limited", "操作过于频繁，请稍后再试。")
         try:
-            reply = self._commands.execute(command, identity, actor)
+            result = self._commands.execute(command, identity, actor)
         except CommandUsageError as exc:
-            reply = str(exc)
+            result = str(exc)
         except EventServerError:
             raise
         audit(logger, command.name, identity.platform, identity.openid, "handled")
-        return DispatchDecision("skip", "command-handled", reply)
+        if isinstance(result, CommandReply):
+            return DispatchDecision(
+                "skip", "command-handled", result.text, image_url=result.image_url
+            )
+        return DispatchDecision("skip", "command-handled", result)
 
     def _process_chat(
         self, identity: MessageIdentity, actor: PermissionSnapshot

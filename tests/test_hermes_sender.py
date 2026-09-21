@@ -11,7 +11,11 @@ class Adapter:
         self.calls = []
 
     async def send(self, chat_id, text):
-        self.calls.append((chat_id, text))
+        self.calls.append(("text", chat_id, text))
+        return SimpleNamespace(success=True, message_id="message-1", raw_response={})
+
+    async def send_image(self, chat_id, image_url, caption=None):
+        self.calls.append(("image", chat_id, image_url, caption))
         return SimpleNamespace(success=True, message_id="message-1", raw_response={})
 
 
@@ -22,6 +26,7 @@ def test_gateway_sender_handles_reply_and_worker_thread_delivery() -> None:
         sender.bind_adapter("qqbot", adapter)
         identity = MessageIdentity("qqbot", "user", "chat", "dm", "/help")
         sender.reply(identity, "reply")
+        sender.reply_image(identity, "https://example.invalid/image.png")
         await asyncio.sleep(0)
         item = DeliveryItem(
             "delivery",
@@ -37,6 +42,31 @@ def test_gateway_sender_handles_reply_and_worker_thread_delivery() -> None:
         outcome = await asyncio.to_thread(sender.send_delivery, item)
         assert outcome.success is True
         assert outcome.message_id == "message-1"
-        assert adapter.calls == [("chat", "reply"), ("target", "notice")]
+        assert adapter.calls == [
+            ("text", "chat", "reply"),
+            ("image", "chat", "https://example.invalid/image.png", None),
+            ("text", "target", "notice"),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_gateway_sender_falls_back_to_text_for_an_older_adapter() -> None:
+    class TextAdapter:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def send(self, chat_id, text):
+            self.calls.append((chat_id, text))
+            return SimpleNamespace(success=True, message_id="message-1", raw_response={})
+
+    async def scenario() -> None:
+        adapter = TextAdapter()
+        sender = GatewaySender(1)
+        sender.bind_adapter("qqbot", adapter)
+        identity = MessageIdentity("qqbot", "user", "chat", "dm", "/wf 地球")
+        sender.reply_image(identity, "https://example.invalid/image.png")
+        await asyncio.sleep(0)
+        assert adapter.calls == [("chat", "https://example.invalid/image.png")]
 
     asyncio.run(scenario())

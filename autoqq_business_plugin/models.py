@@ -53,6 +53,15 @@ class DispatchDecision:
     action: str
     reason: str
     reply: str | None = None
+    image_url: str | None = None
+
+
+@dataclass(frozen=True)
+class CommandReply:
+    """Channel-neutral command result sent through one concrete adapter method."""
+
+    text: str | None = None
+    image_url: str | None = None
 
 
 @dataclass(frozen=True)

@@ -75,6 +75,40 @@ class GatewaySender:
                 )
             )
 
+    def reply_image(
+        self, identity: MessageIdentity, image_url: str, *, caption: str | None = None
+    ) -> None:
+        """Send a native image when supported, with a text fallback for older adapters."""
+        loop, adapter = self._resolve(identity.platform)
+
+        async def send_reply() -> Any:
+            send_image = getattr(adapter, "send_image", None)
+            if callable(send_image):
+                return await send_image(identity.chat_id, image_url, caption=caption)
+            fallback = f"{caption}\n{image_url}" if caption else image_url
+            return await adapter.send(identity.chat_id, fallback)
+
+        def log_failure(future: asyncio.Future[Any]) -> None:
+            try:
+                result = future.result()
+                if not self._normalize(result).success:
+                    logger.warning("autoqq command image reply was not accepted by the adapter")
+            except Exception:
+                logger.exception("autoqq command image reply failed")
+
+        if loop is asyncio.get_running_loop():
+            task = loop.create_task(send_reply())
+            task.add_done_callback(log_failure)
+        else:
+            future = asyncio.run_coroutine_threadsafe(send_reply(), loop)
+            future.add_done_callback(
+                lambda completed: (
+                    logger.warning("autoqq command image reply failed")
+                    if completed.exception()
+                    else None
+                )
+            )
+
     def send_delivery(self, item: DeliveryItem) -> SendOutcome:
         try:
             loop, adapter = self._resolve(item.platform)

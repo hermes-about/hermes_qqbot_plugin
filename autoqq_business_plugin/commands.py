@@ -6,6 +6,7 @@ from .command_policy import CommandPolicyRegistry
 from .eventserver_client import EventServerClient, EventServerError, EventServerResponseError
 from .models import (
     AccessPolicy,
+    CommandReply,
     EventInfo,
     MessageIdentity,
     ParsedCommand,
@@ -147,10 +148,10 @@ class CommandService:
         command: ParsedCommand,
         identity: MessageIdentity,
         actor: PermissionSnapshot,
-    ) -> str:
+    ) -> str | CommandReply:
         if self._wants_help(command):
             return self.help_text(command.name)
-        handlers: dict[str, Callable[..., str]] = {
+        handlers: dict[str, Callable[..., str | CommandReply]] = {
             "/help": self._help,
             "/events": self._events,
             "/whoami": self._whoami,
@@ -379,7 +380,7 @@ class CommandService:
         args: tuple[str, ...],
         _identity: MessageIdentity,
         _actor: PermissionSnapshot,
-    ) -> str:
+    ) -> str | CommandReply:
         if not args:
             raise CommandUsageError(
                 f"用法：{namespace.command} <领域> [指令] [参数...]；"
@@ -490,16 +491,16 @@ class CommandService:
 
     def _format_query_reply(
         self, result: QueryResult, target: QueryTarget, *, filtered: bool
-    ) -> str:
+    ) -> str | CommandReply:
         """Render the answer for the current channel.
 
-        A target configured with `reply: image_url` answers a plain query with the
-        image URL only. A filtered query keeps the text form, because the image
-        cannot show which tasks were selected, and a missing URL falls back to
-        text instead of sending an empty message.
+        A target configured with `reply: image_url` answers a plain query with a
+        native image reply. A filtered query keeps the text form, because the
+        image cannot show which tasks were selected, and a missing URL falls
+        back to text instead of sending an empty message.
         """
         if target.reply == "image_url" and result.image_url and not filtered:
-            return result.image_url
+            return CommandReply(image_url=result.image_url)
         text = result.text.strip()
         if len(text) > self._query_reply_max_chars:
             text = text[: self._query_reply_max_chars] + "…"

@@ -9,7 +9,7 @@ reaches the Plugin core.
 import time
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
@@ -65,6 +65,16 @@ def _optional_text(value: Any, field: str) -> str | None:
     if value is None:
         return None
     return _text(value, field)
+
+
+def _optional_http_url(value: Any, field: str) -> str | None:
+    text = _optional_text(value, field)
+    if text is None:
+        return None
+    parsed = urlsplit(text)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
+        raise QueryServiceProtocolError(f"invalid {field}")
+    return text
 
 
 def _match_key_options(value: Any) -> tuple[MatchKeyOption, ...]:
@@ -256,5 +266,5 @@ def _query_result(value: Any) -> QueryResult:
         query_key=_text(data.get("query_key"), "query_key"),
         title=_text(data.get("title"), "title"),
         text=_text(data.get("text"), "text"),
-        image_url=_optional_text(data.get("image_url"), "image_url"),
+        image_url=_optional_http_url(data.get("image_url"), "image_url"),
     )

@@ -184,11 +184,12 @@ def test_wf_help_marks_a_missing_query_service(policy, tmp_path) -> None:
     assert "未配置查询服务" in (decision.reply or "")
 
 
-def test_wf_bounty_query_replies_with_the_image_url_only(policy, tmp_path) -> None:
+def test_wf_bounty_query_requests_a_native_image_reply(policy, tmp_path) -> None:
     service = FakeQueryService()
     decision = processor(service, policy, tmp_path).process(message("/wf 地球"))
     assert service.calls == [(CETUS_KEY, {})]
-    assert decision.reply == "https://example.invalid/redacted-signed-url"
+    assert decision.reply is None
+    assert decision.image_url == "https://example.invalid/redacted-signed-url"
 
 
 def test_wf_bounty_query_falls_back_to_text_when_the_answer_has_no_image(policy, tmp_path) -> None:

@@ -95,9 +95,13 @@ class PluginRuntime:
                 if self.settings.delivery_poll_enabled:
                     self.worker.start()
             decision = self.processor.process(event)
-            if decision.reply:
+            if decision.image_url:
                 # Identity has already been validated inside the processor; extract again only at
                 # this narrow adapter boundary so the core decision remains immutable.
+                self.sender.reply_image(
+                    extract_identity(event), decision.image_url, caption=decision.reply
+                )
+            elif decision.reply:
                 self.sender.reply(extract_identity(event), decision.reply)
             if decision.action == "allow":
                 return {"action": "allow"}

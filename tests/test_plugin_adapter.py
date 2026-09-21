@@ -13,6 +13,7 @@ class StubSender:
         self.fail = fail
         self.bound = []
         self.replies = []
+        self.image_replies = []
 
     def bind(self, gateway, platform) -> None:
         if self.fail:
@@ -24,6 +25,9 @@ class StubSender:
 
     def reply(self, identity, text) -> None:
         self.replies.append((identity, text))
+
+    def reply_image(self, identity, image_url, *, caption=None) -> None:
+        self.image_replies.append((identity, image_url, caption))
 
 
 class StubWorker:
@@ -69,6 +73,25 @@ def test_hook_contains_adapter_errors_and_fails_closed() -> None:
             "action": "skip",
             "reason": "autoqq-internal-error",
         }
+
+    asyncio.run(scenario())
+
+
+def test_hook_sends_a_structured_image_reply() -> None:
+    async def scenario() -> None:
+        value = runtime(
+            DispatchDecision(
+                "skip", "command-handled", image_url="https://example.invalid/image.png"
+            )
+        )
+        assert value.hook(message("/wf 地球"), SimpleNamespace(adapters={})) == {
+            "action": "skip",
+            "reason": "command-handled",
+        }
+        assert value.sender.image_replies[0][1:] == (
+            "https://example.invalid/image.png",
+            None,
+        )
 
     asyncio.run(scenario())
 

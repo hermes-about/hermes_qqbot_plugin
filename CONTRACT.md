@@ -257,7 +257,14 @@ Content-Type: application/json
         "openid": "TARGET_USER_OPENID"
       },
       "message": {
-        "text": "希图斯已进入夜晚"
+        "text": "【帐篷 A】\n• 搜索并救援",
+        "data": {
+          "subscription_match": {
+            "items": [
+              {"key": "RescueBountyResc", "label": "搜索并救援"}
+            ]
+          }
+        }
       },
       "attempt": 1,
       "created_at": "ISO-8601 UTC"
@@ -272,10 +279,14 @@ Content-Type: application/json
 Plugin 对每条记录执行：
 
 1. 校验 delivery、平台、目标 OpenID 和消息结构。
-2. 调用已验证的 Hermes 主动私聊接口，只发送到记录指定的目标。
-3. 成功后调用 `ack`，携带 `lease_token`、发送时间和可用时的平台消息 ID。
-4. 失败后调用 `fail`，携带 `lease_token`、脱敏 `error_code` 和 `retryable`。
-5. 单条失败不得终止整个 worker，也不得阻塞 QQ 入站处理。
+2. 如 `message.data.subscription_match.items` 合法，将正文中与 `label` 完全相等的
+   `• <label>` 整行渲染为 `• **<label>** 🔴`。禁止模糊或全文替换；同一行内的
+   其他内容、相似名称和非项目符号行不得命中。
+3. 元数据缺失或非法时保持原文；渲染后超过消息长度上限时回退原文并重新校验。
+4. 调用已验证的 Hermes 主动私聊接口，只发送到记录指定的目标。
+5. 成功后调用 `ack`，携带 `lease_token`、发送时间和可用时的平台消息 ID。
+6. 失败后调用 `fail`，携带 `lease_token`、脱敏 `error_code` 和 `retryable`。
+7. 单条失败不得终止整个 worker，也不得阻塞 QQ 入站处理。
 
 通知是确定性投递，不进入 LLM，也不创建普通 Agent 对话轮次。
 
@@ -289,6 +300,8 @@ Plugin 对每条记录执行：
 - Plugin 不持久化租约。重启恢复依赖 EventServer 的租约超时逻辑。
 - EventServer 不可用时不得绕过服务认证或直接访问 MySQL。
 - 新事件类型接入不得要求修改 Plugin。
+- `subscription_match` 是通用展示元数据；Plugin 不得根据 `event_key` 或 Warframe
+  业务字段分支渲染。
 
 ## 9. 缓存与故障处理
 

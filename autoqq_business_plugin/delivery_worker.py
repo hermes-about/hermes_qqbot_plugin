@@ -3,7 +3,9 @@ import random
 import re
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 
+from .delivery_renderer import render_delivery_text
 from .eventserver_client import EventServerClient, EventServerError
 from .models import DeliveryItem, SendOutcome
 from .observability import mask_identifier
@@ -92,6 +94,9 @@ class DeliveryWorker:
     def _handle(self, item: DeliveryItem) -> None:
         outcome = self._validate(item)
         if outcome is None:
+            item = self._render(item)
+            outcome = self._validate(item)
+        if outcome is None:
             try:
                 outcome = self._sender.send_delivery(item)
             except Exception:
@@ -128,3 +133,9 @@ class DeliveryWorker:
         if not isinstance(text, str) or not text.strip() or len(text) > self._max_message_chars:
             return SendOutcome(False, error_code="INVALID_MESSAGE", retryable=False)
         return None
+
+    def _render(self, item: DeliveryItem) -> DeliveryItem:
+        text = render_delivery_text(item.message, max_chars=self._max_message_chars)
+        if text is None or text == item.message.get("text"):
+            return item
+        return replace(item, message={**item.message, "text": text})

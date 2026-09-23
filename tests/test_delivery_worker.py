@@ -5,7 +5,7 @@ from autoqq_business_plugin.eventserver_client import EventServerUnavailable
 from autoqq_business_plugin.models import DeliveryItem, SendOutcome
 
 
-def delivery(identifier: str = "delivery-1", *, text="hello", platform="qqbot"):
+def delivery(identifier: str = "delivery-1", *, text="hello", platform="qqbot", data=None):
     return DeliveryItem(
         delivery_id=identifier,
         lease_token="l" * 32,
@@ -13,7 +13,7 @@ def delivery(identifier: str = "delivery-1", *, text="hello", platform="qqbot"):
         event_key="demo.event.changed",
         platform=platform,
         openid="target-openid",
-        message={"text": text},
+        message={"text": text, "data": data or {}},
         attempt=1,
         created_at=datetime.now(UTC),
     )
@@ -43,7 +43,7 @@ class FakeSender:
         self.sent = []
 
     def send_delivery(self, item):
-        self.sent.append(item.delivery_id)
+        self.sent.append(item)
         return self.outcomes.pop(0)
 
 
@@ -63,7 +63,7 @@ def test_success_is_acked_with_current_lease() -> None:
     client = FakeDeliveryClient([delivery()])
     sender = FakeSender()
     assert worker(client, sender).run_once() == 1
-    assert sender.sent == ["delivery-1"]
+    assert [item.delivery_id for item in sender.sent] == ["delivery-1"]
     assert client.acks == [("delivery-1", "l" * 32, "message-1")]
     assert client.failures == []
 
@@ -100,3 +100,36 @@ def test_writeback_failure_does_not_crash_batch() -> None:
 
     client = FailingWritebackClient([delivery()])
     assert worker(client, FakeSender()).run_once() == 1
+
+
+def test_worker_sends_rendered_subscription_match_text() -> None:
+    item = delivery(
+        text="【帐篷 A】\n• 搜索并救援\n• 捕获 Grineer 特工",
+        data={
+            "subscription_match": {"items": [{"key": "RescueBountyResc", "label": "搜索并救援"}]}
+        },
+    )
+    client = FakeDeliveryClient([item])
+    sender = FakeSender()
+
+    worker(client, sender).run_once()
+
+    assert sender.sent[0].message["text"] == (
+        "【帐篷 A】\n• **搜索并救援** 🔴\n• 捕获 Grineer 特工"
+    )
+
+
+def test_worker_falls_back_to_original_when_highlighting_would_exceed_limit() -> None:
+    text = "• 搜索并救援"
+    item = delivery(
+        text=text,
+        data={
+            "subscription_match": {"items": [{"key": "RescueBountyResc", "label": "搜索并救援"}]}
+        },
+    )
+    client = FakeDeliveryClient([item])
+    sender = FakeSender()
+
+    worker(client, sender, max_message_chars=len(text)).run_once()
+
+    assert sender.sent[0].message["text"] == text

@@ -6,6 +6,19 @@ AutoQQ Plugin 是运行在 Hermes Gateway 内的 QQ 业务接入插件。它在�
 Plugin 不连接 MySQL、不采集事件源，也不持有 QQ App 凭据。用户、权限、订阅、事件和待投递
 消息均由 EventServer 管理。
 
+## 从哪里开始
+
+Plugin 没有独立的 Docker 服务：它由已经运行的 Hermes Gateway 加载。首次部署按顺序完成：
+
+1. 按 [EventServer 部署指南](https://github.com/fkYang/hermes_event_server/blob/main/README.md)
+   启动 API，确认 `/ready` 可用；如需事件通知，再部署至少一个 Publisher 并注册事件目录。
+2. 在 Hermes 宿主机准备 Plugin 环境文件，把它注入 Gateway 的 Compose service，并确认双方共用
+   Docker 网络。
+3. 将本仓库克隆到 Hermes 持久插件目录，运行 doctor，启用后重启 Gateway。
+4. 用 `/help`、`/whoami`、授权和订阅命令验证功能；通知链路按本文后面的步骤验收。
+
+下文命令是部署示例，需把容器名、Compose service、网络和路径替换为实际值。
+
 ## 服务能力
 
 - 从 Hermes 可信消息上下文识别 QQ OpenID。
@@ -16,6 +29,7 @@ Plugin 不连接 MySQL、不采集事件源，也不持有 QQ App 凭据。用�
 - 管理用户授权、角色与事件订阅。
 - 通过受控目录向只读查询服务请求按需数据（如 `/wf 地球`），回复后同样跳过 LLM。
 - 轮询 EventServer delivery，主动向用户 QQ 私聊并回写 `ack` 或 `fail`。
+- 根据 EventServer 提供的收件人订阅交集，通用高亮通知正文中的精确命中项。
 - EventServer 不可用、响应异常或用户被封禁时默认拒绝，不降级为放行。
 
 消息与通知链路：
@@ -41,7 +55,7 @@ EventServer delivery -> Plugin 领取 -> Hermes QQBot 主动私聊 -> ack/fail
 版本 1，因此已验证的部署方式是直接把 Git 仓库克隆到 Hermes 持久插件目录，而不是执行
 `hermes plugins install <git-url>`。后续 Hermes 升级后可重新验证原生安装能力。
 
-## 使用 Git clone 部署
+## 在 Docker 化 Hermes 中部署
 
 以下示例假定：
 
@@ -49,9 +63,10 @@ EventServer delivery -> Plugin 领取 -> Hermes QQBot 主动私聊 -> ack/fail
 - Hermes Compose service 为 `hermes-gateway`；
 - 持久插件目录为 `/opt/data/plugins`。
 
-实际名称不同时，应先用 `docker inspect` 和 Hermes 命令确认，不要直接照搬。
+实际名称不同时，应先用 `docker inspect` 和 Hermes 命令确认，不要直接照搬。`/opt/data/plugins`
+必须位于持久卷；如果只是容器临时文件系统，重建 Gateway 后插件会消失。
 
-### 1. 准备 Plugin 环境变量
+### 1. 配置 Hermes Gateway
 
 在宿主机安全目录创建 `plugin.env`：
 
@@ -104,7 +119,24 @@ networks:
     name: my_web_net
 ```
 
+如果 Hermes Compose 已经有 `env_file`、`volumes` 或 `networks`，合并条目，不要覆盖原配置。
+仅修改容器持久目录中的 `.env` 不一定能让 Gateway 子进程继承变量。需要按需查询时，还要确保
+Gateway 与查询服务处于同一可通信网络；未部署查询服务可保持 `QUERY_SERVICE_*` 注释状态。
 不要给 Plugin 配置 `MYSQL_*`、`DATABASE_URL`、QQ Secret 或腾讯 API 凭据。
+
+为了让事件通知中的匹配项加粗显示，在 Hermes `config.yaml` 中显式启用 QQBot
+Markdown（应与现有 `platforms.qqbot` 配置合并）：
+
+```yaml
+platforms:
+  qqbot:
+    enabled: true
+    extra:
+      markdown_support: true
+```
+
+这是 Hermes 平台配置，不是 `plugin.env` 环境变量。如果关闭，Plugin 仍会生成相同的
+Markdown 文本，但 QQBot Adapter 会按其非 Markdown 路径处理。
 
 ### 2. 克隆 Plugin
 
@@ -124,19 +156,26 @@ docker exec -u 0 hermes git -C /opt/data/plugins/autoqq-business \
   checkout --detach <release-tag-or-full-commit-sha>
 ```
 
-确保 Hermes Gateway 用户可以读取该目录。已验证环境使用 UID/GID `10000:10000`；其他镜像
-应先确认实际运行用户：
+确保 Hermes Gateway 用户可以读取该目录。先检查当前镜像和 Gateway 进程用户，再按实际
+UID/GID 修正所有权；不要固定使用示例 UID：
 
 ```bash
-docker exec -u 0 hermes chown -R 10000:10000 /opt/data/plugins/autoqq-business
+docker exec hermes id
+docker exec -u 0 hermes chown -R <gateway-uid>:<gateway-gid> /opt/data/plugins/autoqq-business
 ```
 
 如果 Hermes 容器不包含 Git，可在宿主机克隆后放入 Hermes 的持久 volume 对应目录，最终
-容器内路径仍应为 `/opt/data/plugins/autoqq-business`。
+容器内路径仍应为 `/opt/data/plugins/autoqq-business`，`plugin.yaml` 必须位于该目录。
+真实 `plugin.env` 应保留在 Git 克隆目录之外。
 
-### 3. 检查、启用并重建 Gateway
+### 3. 重建、检查并启用 Gateway
+
+先在 Hermes Compose 项目目录重新创建 Gateway，使新 `env_file` 生效。然后再运行 doctor；
+doctor 和 Gateway 必须读取同一组 `EVENT_SERVER_URL`、`INTERNAL_API_TOKEN` 配置：
 
 ```bash
+docker compose up -d --force-recreate hermes-gateway
+
 docker exec hermes hermes plugins doctor \
   /opt/data/plugins/autoqq-business --ci
 
@@ -144,10 +183,10 @@ docker exec hermes hermes plugins enable \
   autoqq-business --no-allow-tool-override
 ```
 
-环境变量变化和新 Plugin 都需要重新创建 Gateway 容器。请在 Hermes Compose 项目目录执行：
+启用后重启 Gateway 以加载 Plugin：
 
 ```bash
-docker compose up -d --force-recreate hermes-gateway
+docker compose restart hermes-gateway
 ```
 
 验证：
@@ -298,6 +337,17 @@ claim -> Hermes QQBot 私聊 -> ack/fail
 通知不会进入 LLM，也不会创建普通 Agent 对话。投递语义为至少一次：如果 QQ 已发送成功，
 但 Plugin 在回写 `ack` 前退出，租约过期后可能再次发送同一通知。
 
+对于使用订阅关注项的事件，EventServer 会在每个收件人的消息中附带实际命中标签。
+Plugin 只对正文中完全相等的项目符号行做通用渲染：
+
+```markdown
+【帐篷 A】
+• **搜索并救援** 🔴
+```
+
+不匹配的行保持原样；同一标签出现在多个来源分组时会逐行加粗。该逻辑不依赖
+wfdata 或具体 `event_key`，其他 Publisher 只要遵守同一通用元数据和文本格式即可复用。
+
 ## 更新与回退
 
 更新前先记录当前 commit 并确认工作树干净：
@@ -307,13 +357,14 @@ docker exec hermes git -C /opt/data/plugins/autoqq-business rev-parse HEAD
 docker exec hermes git -C /opt/data/plugins/autoqq-business status --short
 ```
 
-更新到远端 `main`：
+更新到远端 `main`。以下 `chown` 中的 UID/GID 应与首次部署时核实的一致；命令在 Hermes
+Compose 项目目录执行：
 
 ```bash
 docker exec -u 0 hermes git -C /opt/data/plugins/autoqq-business fetch origin main
 docker exec -u 0 hermes git -C /opt/data/plugins/autoqq-business \
   checkout --detach origin/main
-docker exec -u 0 hermes chown -R 10000:10000 /opt/data/plugins/autoqq-business
+docker exec -u 0 hermes chown -R <gateway-uid>:<gateway-gid> /opt/data/plugins/autoqq-business
 docker exec hermes hermes plugins doctor \
   /opt/data/plugins/autoqq-business --ci
 docker compose up -d --force-recreate hermes-gateway
@@ -338,6 +389,8 @@ docker compose up -d --force-recreate hermes-gateway
 ## 参考文档
 
 - [完整环境变量模板](.env.example)
+- [当前架构与关键数据流](docs/architecture.md)
 - [权限、命令和投递契约](CONTRACT.md)
 - [QQ/Hermes payload 核验清单](docs/qq-payload-probe.md)
 - [AutoQQ EventServer](https://github.com/fkYang/hermes_event_server)
+- [独立 Publisher 仓库](https://github.com/hermes-about/hermes_providers)

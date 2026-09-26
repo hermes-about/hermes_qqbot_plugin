@@ -1,5 +1,6 @@
 import asyncio
 import concurrent.futures
+import html
 import logging
 import threading
 from typing import Any
@@ -50,11 +51,12 @@ class GatewaySender:
         with self._lock:
             return self._loop is not None and (self._gateway is not None or bool(self._adapters))
 
-    def reply(self, identity: MessageIdentity, text: str) -> None:
+    def reply(self, identity: MessageIdentity, text: str, *, mention_sender: bool = False) -> None:
         loop, adapter = self._resolve(identity.platform)
+        content = self._reply_content(identity, text, mention_sender=mention_sender)
 
         async def send_reply() -> Any:
-            return await adapter.send(identity.chat_id, text)
+            return await adapter.send(identity.chat_id, content)
 
         def log_failure(future: asyncio.Future[Any]) -> None:
             try:
@@ -117,7 +119,20 @@ class GatewaySender:
             return SendOutcome(False, error_code="HERMES_NOT_READY", retryable=True)
 
         async def send_message() -> Any:
-            return await adapter.send(item.openid, str(item.message["text"]))
+            chat_id = item.chat_id or item.openid
+            identity = MessageIdentity(
+                item.platform,
+                item.openid,
+                chat_id,
+                item.chat_type,
+                "",
+            )
+            content = self._reply_content(
+                identity,
+                str(item.message["text"]),
+                mention_sender=item.chat_type == "group",
+            )
+            return await adapter.send(chat_id, content)
 
         future = asyncio.run_coroutine_threadsafe(send_message(), loop)
         try:
@@ -175,3 +190,10 @@ class GatewaySender:
             error_code="HERMES_SEND_REJECTED",
             retryable=True,
         )
+
+    @staticmethod
+    def _reply_content(identity: MessageIdentity, text: str, *, mention_sender: bool) -> str:
+        if not mention_sender or identity.platform != "qqbot" or identity.chat_type != "group":
+            return text
+        openid = html.escape(identity.openid, quote=True)
+        return f'<qqbot-at-user id="{openid}" /> {text}'

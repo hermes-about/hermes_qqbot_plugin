@@ -81,11 +81,16 @@ class MessageProcessor:
         except EventServerError:
             raise
         audit(logger, command.name, identity.platform, identity.openid, "handled")
+        mention_sender = command.name == "/bind" and identity.chat_type == "group"
         if isinstance(result, CommandReply):
             return DispatchDecision(
-                "skip", "command-handled", result.text, image_url=result.image_url
+                "skip",
+                "command-handled",
+                result.text,
+                image_url=result.image_url,
+                mention_sender=mention_sender,
             )
-        return DispatchDecision("skip", "command-handled", result)
+        return DispatchDecision("skip", "command-handled", result, mention_sender=mention_sender)
 
     def _process_chat(
         self, identity: MessageIdentity, actor: PermissionSnapshot

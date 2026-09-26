@@ -23,8 +23,8 @@ class StubSender:
     def bind_adapter(self, platform, adapter) -> None:
         self.bound.append((platform, adapter))
 
-    def reply(self, identity, text) -> None:
-        self.replies.append((identity, text))
+    def reply(self, identity, text, *, mention_sender=False) -> None:
+        self.replies.append((identity, text, mention_sender))
 
     def reply_image(self, identity, image_url, *, caption=None) -> None:
         self.image_replies.append((identity, image_url, caption))
@@ -60,6 +60,14 @@ def test_hook_maps_core_allow_and_skip_and_schedules_reply() -> None:
             "reason": "handled",
         }
         assert skipped.sender.replies[0][1] == "reply text"
+        assert skipped.sender.replies[0][2] is False
+
+        group = runtime(DispatchDecision("skip", "handled", "bound", mention_sender=True))
+        assert group.hook(
+            message("/bind demo.event.changed", chat_type="group", chat_id="group-openid"),
+            gateway,
+        ) == {"action": "skip", "reason": "handled"}
+        assert group.sender.replies[0][2] is True
 
     asyncio.run(scenario())
 

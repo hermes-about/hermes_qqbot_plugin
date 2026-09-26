@@ -8,10 +8,10 @@ EventServer HTTP 交互的规范细节以 [Plugin Contract](../CONTRACT.md) 为�
 
 | 项目 | 值 |
 | --- | --- |
-| 观察日期 | 2026-09-23 |
+| 观察日期 | 2026-09-26 |
 | Git 分支 | `main` |
-| 源码基线 | `c6964db`，并包含当前工作区的 delivery 渲染更新 |
-| 包版本 | `0.3.3` |
+| 源码基线 | `main`，并包含当前工作区的订阅绑定上下文更新 |
+| 包版本 | `0.4.0` |
 | Python | `>=3.12` |
 
 架构事实来自 `plugin.yaml`、`pyproject.toml`、`autoqq_business_plugin/`、`config/` 和测试。
@@ -53,7 +53,7 @@ HTTP 服务或数据库。
 
 ```text
 Hermes event
-  -> 从可信 QQBot payload 提取 platform/openid
+  -> 从可信 QQBot payload 提取 platform/openid/chat_type/chat_id
   -> 查询 EventServer 权限快照
   -> 斜杠命令：策略检查 -> 确定性执行 -> skip LLM
   -> 普通消息：active + chat=true -> allow LLM
@@ -63,6 +63,15 @@ Hermes event
 所有斜杠命令都由 Plugin 终止处理，包括未知命令和格式错误命令。`public`、`authorized`、
 `admin` 只决定命令需要的权限层级；`blocked` 状态、身份可信度、限流和 EventServer 可用性始终
 先于命令执行。EventServer 请求失败时不会退化为允许进入 LLM。
+
+`/bind` 把当前 `chat_type/chat_id` 作为通用 `binding_context` 提交给 EventServer。命令回复始终
+发送到当前 `chat_id`，因此私聊原路回复、群聊回到原群；群聊 `/bind` 再由 `hermes_sender.py`
+在发送边界添加可信发送者的 QQ @ 标记。EventServer 生成 delivery 时把这一上下文固化为目标；
+Plugin 对群聊通知同样添加订阅用户的 QQ @，旧目标缺失上下文时回退为 OpenID 私聊。
+
+Plugin 展示和管理 `bind` scope，但不自行判断事件前缀。创建或更新订阅时，EventServer 先把别名
+解析成规范事件键，再按 `*`、`domain.*`、`domain.resource.*` 的点分隔边界鉴权，并在发布时
+再次过滤。权限变更成功后 Plugin 立即清除该用户的权限缓存。
 
 ## 按需查询流
 
@@ -84,10 +93,11 @@ Token。用户不能通过命令提供 URL、路径或模板表达式。
 ```text
 DeliveryWorker claim
   -> 校验 platform、openid、原始消息长度和租约字段
+  -> 校验 target.chat_type/chat_id；旧 delivery 回退到 openid 私聊
   -> 解析 message.data.subscription_match.items
   -> 精确匹配「• <label>」整行并渲染为「• **<label>** 🔴」
   -> 重新校验最终消息长度
-  -> HermesSender 调用 QQBot adapter
+  -> HermesSender 调用 QQBot adapter 发送到 chat_id；群聊正文前 @ openid
   -> 成功：ack(delivery_id, lease_token)
   -> 失败：fail(delivery_id, lease_token, retryable, error_code)
 ```

@@ -6,6 +6,7 @@ from .command_policy import CommandPolicyRegistry
 from .eventserver_client import EventServerClient, EventServerError, EventServerResponseError
 from .models import (
     AccessPolicy,
+    BindingContext,
     CommandReply,
     EventInfo,
     MessageIdentity,
@@ -33,8 +34,10 @@ from .query_params import validate as validate_query_params
 
 _PAIRING_CODE = re.compile(r"^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{8}$")
 _EXPLICIT_OPENID = re.compile(r"^[A-Za-z0-9._:-]{6,128}$")
+_BIND_SCOPE = re.compile(r"^(?:\*|[a-z0-9]+(?:\.[a-z0-9_]+)*\.\*)$")
 _DIMENSIONS = {"chat": ["chat"], "command": ["command"], "all": ["chat", "command"]}
 _MAX_MATCH_KEYS = 32
+_MAX_BIND_SCOPES = 32
 _DEFAULT_QUERY_REPLY_MAX_CHARS = 1200
 
 _COMMAND_HELP: dict[str, str] = {
@@ -53,12 +56,15 @@ _COMMAND_HELP: dict[str, str] = {
     "/bindings": "用法：/bindings\n列出当前订阅及其关注项。",
     "/grant": (
         "用法：/grant <目标|pairing_code> chat|command|all\n"
-        "授予权限，必须显式指定 chat、command 或 all。"
+        "   或：/grant <目标> bind <scope...>\n"
+        "布尔权限必须显式指定；bind scope 形如 *、warframe.*、warframe.cetus.*。"
     ),
     "/revoke": (
-        "用法：/revoke <目标> chat|command|all\n撤销权限；撤销 command 后订阅保留但暂停投递。"
+        "用法：/revoke <目标> chat|command|all\n"
+        "   或：/revoke <目标> bind <scope...|all>\n"
+        "撤销 command 或 bind 后订阅保留但暂停投递。"
     ),
-    "/admin": "用法：/admin <目标>\n把目标设为管理员，不会自动授予 chat 或 command。",
+    "/admin": "用法：/admin <目标>\n把目标设为管理员，不会自动授予 chat、command 或 bind。",
     "/unadmin": "用法：/unadmin <目标>\n移除目标的管理员角色，不会改动权限。",
     "/permissions": "用法：/permissions <目标>\n查看目标的账号状态、角色和权限。",
     "/userlist": "用法：/userlist\n当前 EventServer v1 未提供用户列表接口，命令会安全终止。",
@@ -224,13 +230,19 @@ class CommandService:
             requested = tokens
         try:
             result = self._client.subscribe(
-                identity.platform, identity.openid, event_key, requested
+                identity.platform,
+                identity.openid,
+                event_key,
+                requested,
+                BindingContext(identity.chat_type, identity.chat_id),
             )
         except EventServerResponseError as exc:
             if exc.status_code == 404:
                 return f"没有找到事件 {event_key}。发送 /events 查看可用事件。"
             if exc.status_code == 400:
                 return f"关注项未被接受。发送 /events {event_key} 查看可选值。"
+            if exc.status_code == 403:
+                return f"没有绑定 {event_key} 的 bind 权限，请联系管理员授予对应事件前缀。"
             raise
         return self._format_bind_result(result, event, requested)
 
@@ -259,19 +271,42 @@ class CommandService:
         lines = []
         for item in items:
             event = self._find_event(events, item.event_key)
+            source = self._binding_source_label(item.binding_context)
             if item.match_keys:
                 names = "、".join(
                     (event.option_label(key) or key) if event is not None else key
                     for key in item.match_keys
                 )
-                lines.append(f"- {item.event_key}：关注 {names}")
+                lines.append(f"- {item.event_key}：关注 {names}；绑定于{source}")
             else:
-                lines.append(f"- {item.event_key}：关注全部")
+                lines.append(f"- {item.event_key}：关注全部；绑定于{source}")
         return "当前订阅：\n" + "\n".join(lines)
+
+    @staticmethod
+    def _binding_source_label(binding: BindingContext | None) -> str:
+        if binding is None:
+            return "未知会话（旧订阅）"
+        return "群聊" if binding.chat_type == "group" else "私聊"
 
     def _grant(
         self, args: tuple[str, ...], identity: MessageIdentity, _actor: PermissionSnapshot
     ) -> str:
+        if len(args) >= 2 and args[1].lower() == "bind":
+            if len(args) < 3:
+                raise CommandUsageError("用法：/grant <目标> bind <scope...>")
+            if _PAIRING_CODE.fullmatch(args[0].upper()):
+                raise CommandUsageError(
+                    "bind scope 不能授予 pairing code，请使用目标 OpenID 或 @。"
+                )
+            target = self._target(args[0], identity)
+            scopes = self._bind_scope_tokens(args[2:])
+            result = self._client.grant_bind(
+                identity.platform, target, list(scopes), identity.openid
+            )
+            self._cache.invalidate(result.platform, result.openid)
+            return "授权成功：" + self._format_permission(
+                result, label=mask_identifier(result.openid)
+            )
         self._expect(args, 2, "/grant <目标|pairing_code> chat|command|all")
         permissions = self._permissions_arg(args[1])
         raw_target = args[0]
@@ -288,6 +323,26 @@ class CommandService:
     def _revoke(
         self, args: tuple[str, ...], identity: MessageIdentity, _actor: PermissionSnapshot
     ) -> str:
+        if len(args) >= 2 and args[1].lower() == "bind":
+            if len(args) < 3:
+                raise CommandUsageError("用法：/revoke <目标> bind <scope...|all>")
+            target = self._target(args[0], identity)
+            raw = args[2:]
+            clear_all = len(raw) == 1 and raw[0].lower() == "all"
+            if not clear_all and any(item.lower() == "all" for item in raw):
+                raise CommandUsageError("bind 的 all 必须单独使用。")
+            scopes = () if clear_all else self._bind_scope_tokens(raw)
+            result = self._client.revoke_bind(
+                identity.platform,
+                target,
+                list(scopes),
+                identity.openid,
+                clear_all=clear_all,
+            )
+            self._cache.invalidate(result.platform, result.openid)
+            return "撤权成功：" + self._format_permission(
+                result, label=mask_identifier(result.openid)
+            )
         self._expect(args, 2, "/revoke <目标> chat|command|all")
         target = self._target(args[0], identity)
         result = self._client.revoke(
@@ -607,8 +662,25 @@ class CommandService:
         return tuple(tokens)
 
     @staticmethod
+    def _bind_scope_tokens(args: tuple[str, ...]) -> tuple[str, ...]:
+        scopes: list[str] = []
+        for raw in args:
+            for part in raw.split(","):
+                scope = part.strip()
+                if not scope or len(scope) > 128 or not _BIND_SCOPE.fullmatch(scope):
+                    raise CommandUsageError(
+                        "bind scope 必须是 * 或小写命名空间前缀，例如 warframe.*。"
+                    )
+                if scope not in scopes:
+                    scopes.append(scope)
+        if len(scopes) > _MAX_BIND_SCOPES:
+            raise CommandUsageError(f"一次最多处理 {_MAX_BIND_SCOPES} 个 bind scope。")
+        return tuple(scopes)
+
+    @staticmethod
     def _format_permission(snapshot: PermissionSnapshot, label: str) -> str:
+        bind = ",".join(snapshot.bind) if snapshot.bind else "none"
         return (
             f"{label} status={snapshot.account_status} role={snapshot.role} "
-            f"chat={str(snapshot.chat).lower()} command={str(snapshot.command).lower()}"
+            f"chat={str(snapshot.chat).lower()} command={str(snapshot.command).lower()} bind={bind}"
         )

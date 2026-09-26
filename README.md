@@ -1,7 +1,7 @@
 # AutoQQ Hermes Plugin
 
 AutoQQ Plugin 是运行在 Hermes Gateway 内的 QQ 业务接入插件。它在消息进入 LLM 前完成权限与
-命令处理，并从 AutoQQ EventServer 领取通知，通过 Hermes 已连接的 QQBot 主动向用户发送私聊。
+命令处理，并从 AutoQQ EventServer 领取通知，通过 Hermes 已连接的 QQBot 发送到订阅绑定会话。
 
 Plugin 不连接 MySQL、不采集事件源，也不持有 QQ App 凭据。用户、权限、订阅、事件和待投递
 消息均由 EventServer 管理。
@@ -22,13 +22,13 @@ Plugin 没有独立的 Docker 服务：它由已经运行的 Hermes Gateway 加�
 ## 服务能力
 
 - 从 Hermes 可信消息上下文识别 QQ OpenID。
-- 分别控制普通聊天权限 `chat` 和业务命令权限 `command`。
+- 分别控制普通聊天权限 `chat`、业务命令权限 `command` 和事件前缀权限 `bind`。
 - 支持 `public`、`authorized`、`admin` 三类命令策略。
 - 在 LLM 前确定性处理命令；已处理命令不会进入 LLM。
 - 为未知用户申请一次性 pairing code。
-- 管理用户授权、角色与事件订阅。
+- 管理用户授权、角色与事件订阅，并记录每个订阅来自私聊还是群聊。
 - 通过受控目录向只读查询服务请求按需数据（如 `/wf 地球`），回复后同样跳过 LLM。
-- 轮询 EventServer delivery，主动向用户 QQ 私聊并回写 `ack` 或 `fail`。
+- 轮询 EventServer delivery，向固化的私聊或群聊目标发送并回写 `ack` 或 `fail`；群聊会 @ 用户。
 - 根据 EventServer 提供的收件人订阅交集，通用高亮通知正文中的精确命中项。
 - EventServer 不可用、响应异常或用户被封禁时默认拒绝，不降级为放行。
 
@@ -38,7 +38,7 @@ Plugin 没有独立的 Docker 服务：它由已经运行的 Hermes Gateway 加�
 QQ 消息 -> Hermes QQBot -> AutoQQ Plugin
                          -> 权限/命令请求 -> EventServer -> MySQL
 
-EventServer delivery -> Plugin 领取 -> Hermes QQBot 主动私聊 -> ack/fail
+EventServer delivery -> Plugin 领取 -> Hermes QQBot 发送到绑定会话（群聊 @ 用户） -> ack/fail
 ```
 
 ## 部署前提
@@ -218,7 +218,7 @@ docker logs --since 10m hermes
 2. 预定管理员向机器人发送一条普通消息。
 3. Plugin 返回一个约 10 分钟有效的 pairing code。
 4. 运维人员在 EventServer 部署主机执行本地一次性首管理员引导命令。
-5. 引导成功后，该账号获得 `active + admin + chat=true + command=true`。
+5. 引导成功后，该账号获得 `active + admin + chat=true + command=true + bind=*`。
 
 一次性首管理员引导由 EventServer 完成，Plugin 不直接修改数据库。
 
@@ -237,7 +237,8 @@ docker logs --since 10m hermes
 | 权限 | 能力 |
 | --- | --- |
 | `chat=true` | 普通消息可以进入 Hermes LLM |
-| `command=true` | 可以执行受保护命令、管理订阅并接收事件通知 |
+| `command=true` | 可以执行受保护命令 |
+| `bind=<scope...>` | 可以绑定并接收命中事件前缀的通知 |
 
 管理员角色不会自动授予权限。管理员命令要求账号为 `active`、`role=admin` 且
 `command=true`。
@@ -249,11 +250,13 @@ docker logs --since 10m hermes
 | `/help` | public | 查看命令帮助 |
 | `/events [event_key]` | public | 查看可订阅事件；带事件键时列出该事件的可关注任务 |
 | `/whoami` | public | 查看自己的脱敏身份、状态和权限 |
-| `/bind <event_key> [关注项...]` | authorized | 订阅事件，可指定要关注的任务 |
+| `/bind <event_key> [关注项...]` | authorized | 订阅事件，可指定关注任务并记录当前会话 |
 | `/unbind <event_key>` | authorized | 取消订阅 |
-| `/bindings` | authorized | 查看当前订阅及其关注项 |
+| `/bindings` | authorized | 查看当前订阅、关注项和绑定会话类型 |
 | `/grant <目标或配对码> chat\|command\|all` | admin | 授予权限 |
+| `/grant <目标> bind <scope...>` | admin | 增加事件绑定前缀权限 |
 | `/revoke <目标> chat\|command\|all` | admin | 撤销权限 |
+| `/revoke <目标> bind <scope...\|all>` | admin | 删除指定或全部事件绑定前缀权限 |
 | `/admin <目标>` | admin | 设置管理员角色，不自动授予权限 |
 | `/unadmin <目标>` | admin | 移除管理员角色 |
 | `/permissions <目标>` | admin | 查看目标权限 |
@@ -268,6 +271,29 @@ docker logs --since 10m hermes
 EventServer 不可用时 public 命令也会失败关闭。无法可靠解析 `@昵称` 时，应使用 pairing code
 或明确 OpenID，不能按昵称授权。
 
+### 事件绑定权限
+
+`bind` scope 只接受 `*` 或以 `.*` 结尾的小写点分隔前缀。例如：
+
+```text
+/grant <用户OpenID> bind *
+/grant <用户OpenID> bind warframe.*
+/grant <用户OpenID> bind warframe.cetus.*
+/revoke <用户OpenID> bind warframe.cetus.*
+/revoke <用户OpenID> bind all
+```
+
+匹配按点分隔边界进行：`warframe.*` 可以授权 `warframe.cetus.bounty_current`，但不会授权
+`warframe2.cetus.bounty_current`。`/grant ... all` 仍只表示 `chat+command`，不会隐式授予
+`bind=*`；pairing code 也不能直接接收 scope，用户配对后应按 OpenID 另行授权。
+
+EventServer 首次升级到 `e91c7a4d6b20` 时，会为当时已经存在的非管理员用户回填
+`warframe.cetus.*`。迁移完成后新建的用户仍然默认没有 bind scope，需要管理员显式授权。
+
+创建或更新订阅要求 `active + command=true` 且事件键命中 scope。撤销或收窄 scope 后旧订阅
+不会删除，用户仍可 `/unbind`；EventServer 停止为不再授权的订阅创建新 delivery，重新授权只
+恢复未来事件。
+
 ### 关注项
 
 有些事件支持「只关注其中一部分内容」，例如 Cetus 赏金轮换事件支持关注具体任务。关注项的
@@ -279,6 +305,12 @@ EventServer 不可用时 public 命令也会失败关闭。无法可靠解析 `@
 关注项既可以写目录里的任务键（如 `RescueBountyResc`），也可以写中文名（如 `搜索并救援`），
 大小写不敏感；Plugin 把它们确定性映射成任务键后再提交给 EventServer，服务端只接受目录里
 声明的键。`/bindings` 会显示中文名（目录不可用时回退为任务键）。
+
+绑定来源随订阅保存。私聊执行 `/bind` 时确认消息回到当前私聊；群聊执行时确认消息回到原群，
+并 @ 发起绑定的用户。再次从另一个会话绑定同一事件会更新关注项和绑定来源。旧订阅在再次绑定前
+显示为「未知会话（旧订阅）」，其通知回退到用户私聊。EventServer 创建 delivery 时会固化当前
+来源，因此私聊绑定的通知发私聊，群聊绑定的通知发到原群并 @ 用户；之后重新绑定不会改写已经
+创建的 delivery。
 
 ### 按需查询
 
@@ -327,7 +359,8 @@ Plugin 侧直接拒绝，不会打到查询服务。
 
 ## 事件通知
 
-用户具有 `command=true` 并完成 `/bind <event_key>` 后，EventServer 在事件发生时创建
+用户具有 `command=true`、匹配事件键的 `bind` scope 并完成 `/bind <event_key>` 后，
+EventServer 在事件发生时创建
 delivery。Plugin 自动完成：
 
 ```text
@@ -380,7 +413,7 @@ docker compose up -d --force-recreate hermes-gateway
 | Plugin doctor 报 URL 或 Token 配置错误 | 确认环境变量已经注入 doctor 和 Gateway 进程，Token 至少 32 个字符 |
 | Gateway 启动后未加载 Plugin | 检查目录、所有权、enable 状态，并重新创建 Gateway 容器 |
 | `/help` 也被拒绝 | 检查 EventServer `/ready`、Docker 网络和两端 Token；Plugin 按失败关闭处理 |
-| 一直领取不到通知 | 检查 `DELIVERY_POLL_ENABLED`、稳定 worker ID、用户 `command` 权限和订阅 |
+| 一直领取不到通知 | 检查 `DELIVERY_POLL_ENABLED`、稳定 worker ID、用户 `command`、事件 `bind` scope 和订阅 |
 | delivery 持续 retry | 检查 Hermes QQBot 连接、发送限制和 EventServer 的脱敏错误码 |
 | 通知偶尔重复 | 这是发送成功但 `ack` 前退出时的至少一次投递边界 |
 | `/wf` 回复「查询服务未启用」 | 检查 Plugin 的 `QUERY_SERVICE_URL`、`QUERY_SERVICE_TOKEN`，以及 Publisher 的 `QUERY_API_TOKEN` 是否一致 |

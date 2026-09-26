@@ -1,6 +1,6 @@
 from conftest import FakeClient, make_processor, message
 
-from autoqq_business_plugin.models import PermissionSnapshot, SubscriptionInfo
+from autoqq_business_plugin.models import BindingContext, PermissionSnapshot, SubscriptionInfo
 
 ACTIVE = PermissionSnapshot("qqbot", "user-openid", "active", "user", False, True)
 BOUNTY = "warframe.cetus.bounty_current"
@@ -40,6 +40,7 @@ def test_bind_with_watch_keys_reports_labels_and_passes_them_through(policy) -> 
         "user-openid",
         BOUNTY,
         ("RescueBountyResc", "ReclamationBountyCap"),
+        ("dm", "user-openid"),
     ) in client.calls
     assert "已订阅" in (decision.reply or "")
     assert "搜索并救援" in (decision.reply or "")
@@ -56,6 +57,7 @@ def test_bind_accepts_separate_arguments_and_deduplicates(policy) -> None:
         "user-openid",
         BOUNTY,
         ("RescueBountyResc",),
+        ("dm", "user-openid"),
     ) in client.calls
 
 
@@ -75,6 +77,7 @@ def test_bind_accepts_the_chinese_label_and_sends_the_canonical_key(policy) -> N
         "user-openid",
         BOUNTY,
         ("RescueBountyResc",),
+        ("dm", "user-openid"),
     ) in client.calls
     assert "搜索并救援" in (decision.reply or "")
 
@@ -88,6 +91,7 @@ def test_bind_deduplicates_a_label_and_its_key(policy) -> None:
         "user-openid",
         BOUNTY,
         ("RescueBountyResc",),
+        ("dm", "user-openid"),
     ) in client.calls
 
 
@@ -100,6 +104,7 @@ def test_bind_accepts_a_lowercase_key(policy) -> None:
         "user-openid",
         BOUNTY,
         ("RescueBountyResc",),
+        ("dm", "user-openid"),
     ) in client.calls
 
 
@@ -124,6 +129,26 @@ def test_bind_without_options_keeps_the_simple_reply(policy) -> None:
     assert "已订阅 demo.event.changed" in (decision.reply or "")
 
 
+def test_group_bind_records_group_context_and_mentions_the_sender(policy) -> None:
+    client = FakeClient(ACTIVE)
+    decision = make_processor(client, policy).process(
+        message(
+            "/bind demo.event.changed",
+            chat_type="group",
+            chat_id="group-openid",
+        )
+    )
+    assert decision.mention_sender is True
+    assert (
+        "bind",
+        "qqbot",
+        "user-openid",
+        "demo.event.changed",
+        (),
+        ("group", "group-openid"),
+    ) in client.calls
+
+
 def test_bind_reports_an_updated_watch_list(policy) -> None:
     client = FakeClient(ACTIVE)
     client.updated = True
@@ -135,13 +160,24 @@ def test_bind_reports_an_updated_watch_list(policy) -> None:
 def test_bindings_shows_watched_keys(policy) -> None:
     client = FakeClient(ACTIVE)
     client.subscriptions = [
-        SubscriptionInfo(BOUNTY, "zh-CN", match_keys=("RescueBountyResc",)),
-        SubscriptionInfo("demo.event.changed", "zh-CN"),
+        SubscriptionInfo(
+            BOUNTY,
+            "zh-CN",
+            match_keys=("RescueBountyResc",),
+            binding_context=BindingContext("group", "group-openid"),
+        ),
+        SubscriptionInfo(
+            "demo.event.changed",
+            "zh-CN",
+            binding_context=BindingContext("dm", "user-openid"),
+        ),
     ]
     decision = make_processor(client, policy).process(message("/bindings"))
     reply = decision.reply or ""
     assert f"- {BOUNTY}：关注 搜索并救援" in reply
     assert "- demo.event.changed：关注全部" in reply
+    assert "绑定于群聊" in reply
+    assert "绑定于私聊" in reply
 
 
 def test_help_mentions_watch_keys(policy) -> None:

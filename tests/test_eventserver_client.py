@@ -9,6 +9,7 @@ from autoqq_business_plugin.eventserver_client import (
     EventServerProtocolError,
     EventServerResponseError,
 )
+from autoqq_business_plugin.models import BindingContext
 
 
 def response(status: int, payload) -> httpx.Response:
@@ -29,7 +30,11 @@ def test_permission_request_matches_eventserver_contract() -> None:
                 "openid": "user/id",
                 "account_status": "active",
                 "role": "user",
-                "permissions": {"chat": True, "command": False},
+                "permissions": {
+                    "chat": True,
+                    "command": False,
+                    "bind": ["warframe.*", "warframe.cetus.*"],
+                },
             },
         )
 
@@ -38,10 +43,50 @@ def test_permission_request_matches_eventserver_contract() -> None:
     )
     result = client.get_permission("qqbot", "user/id")
     assert result.chat is True and result.command is False
+    assert result.bind == ("warframe.*", "warframe.cetus.*")
     assert seen[0].url.path == "/v1/users/user/id/permission"
     assert seen[0].url.params["platform"] == "qqbot"
     assert seen[0].headers["Authorization"] == f"Bearer {'x' * 32}"
     assert seen[0].headers["X-Request-ID"]
+
+
+def test_bind_scope_mutations_match_eventserver_contract() -> None:
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        body = json.loads(request.content)
+        remaining = [] if body.get("clear_bind") else body.get("bind", [])
+        return response(
+            200,
+            {
+                "platform": "qqbot",
+                "openid": "target-openid",
+                "account_status": "active",
+                "role": "user",
+                "permissions": {"chat": False, "command": True, "bind": remaining},
+            },
+        )
+
+    client = EventServerClient(
+        "http://eventserver:8080", "x" * 32, transport=httpx.MockTransport(handler)
+    )
+    granted = client.grant_bind("qqbot", "target-openid", ["warframe.*"], "admin-openid")
+    cleared = client.revoke_bind("qqbot", "target-openid", [], "admin-openid", clear_all=True)
+
+    assert granted.bind == ("warframe.*",)
+    assert cleared.bind == ()
+    assert json.loads(seen[0].content) == {
+        "permissions": [],
+        "bind": ["warframe.*"],
+        "operator_openid": "admin-openid",
+    }
+    assert json.loads(seen[1].content) == {
+        "permissions": [],
+        "bind": [],
+        "clear_bind": True,
+        "operator_openid": "admin-openid",
+    }
 
 
 def test_claim_and_ack_match_implemented_contract() -> None:
@@ -59,7 +104,12 @@ def test_claim_and_ack_match_implemented_contract() -> None:
                             "lease_token": "l" * 32,
                             "event_id": "event-1",
                             "event_key": "demo.event.changed",
-                            "target": {"platform": "qqbot", "openid": "target-openid"},
+                            "target": {
+                                "platform": "qqbot",
+                                "openid": "target-openid",
+                                "chat_type": "group",
+                                "chat_id": "group-openid",
+                            },
                             "message": {"text": "hello"},
                             "attempt": 1,
                             "created_at": datetime.now(UTC).isoformat(),
@@ -81,6 +131,8 @@ def test_claim_and_ack_match_implemented_contract() -> None:
         "http://eventserver:8080", "x" * 32, transport=httpx.MockTransport(handler)
     )
     item = client.claim_deliveries("worker-1", "qqbot", 10, 60)[0]
+    assert item.chat_type == "group"
+    assert item.chat_id == "group-openid"
     client.ack_delivery(item.delivery_id, item.lease_token, "message-1")
     claim_body = json.loads(requests[0].content)
     ack_body = json.loads(requests[1].content)
@@ -189,6 +241,7 @@ def test_subscribe_sends_watch_keys_and_treats_update_as_changed() -> None:
                 "match_keys": ["RescueBountyResc"],
                 "created": False,
                 "updated": True,
+                "binding_context": {"chat_type": "group", "chat_id": "group-openid"},
             },
         )
 
@@ -196,15 +249,21 @@ def test_subscribe_sends_watch_keys_and_treats_update_as_changed() -> None:
         "http://eventserver:8080", "x" * 32, transport=httpx.MockTransport(handler)
     )
     result = client.subscribe(
-        "qqbot", "user-openid", "warframe.cetus.bounty_current", ("RescueBountyResc",)
+        "qqbot",
+        "user-openid",
+        "warframe.cetus.bounty_current",
+        ("RescueBountyResc",),
+        BindingContext("group", "group-openid"),
     )
     assert json.loads(seen[0].content) == {
         "event_key": "warframe.cetus.bounty_current",
         "match_keys": ["RescueBountyResc"],
+        "binding_context": {"chat_type": "group", "chat_id": "group-openid"},
     }
     assert result.match_keys == ("RescueBountyResc",)
     assert result.updated is True
     assert result.changed is True
+    assert result.binding_context == BindingContext("group", "group-openid")
 
 
 def test_list_subscriptions_parses_watch_keys() -> None:
@@ -219,6 +278,7 @@ def test_list_subscriptions_parses_watch_keys() -> None:
                         "event_key": "warframe.cetus.bounty_current",
                         "locale": "zh-CN",
                         "match_keys": ["RescueBountyResc", "ReclamationBountyCap"],
+                        "binding_context": {"chat_type": "group", "chat_id": "group-openid"},
                     },
                     {"event_key": "demo.event.changed", "locale": "zh-CN"},
                 ],
@@ -227,4 +287,5 @@ def test_list_subscriptions_parses_watch_keys() -> None:
     )
     watched, plain = client.list_subscriptions("qqbot", "user-openid")
     assert watched.match_keys == ("RescueBountyResc", "ReclamationBountyCap")
+    assert watched.binding_context == BindingContext("group", "group-openid")
     assert plain.match_keys == ()

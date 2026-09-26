@@ -12,7 +12,8 @@ Plugin 运行在 Hermes 内，负责：
 - 在 LLM 或受保护命令执行前完成权限判断。
 - 确定性处理斜杠命令，处理完成后始终跳过 LLM。
 - 按受控目录向只读查询服务请求按需数据，并把渠道无关结果回复给用户。
-- 从 EventServer 领取通用待投递消息，并通过 Hermes 主动私聊发送。
+- 从 EventServer 领取通用待投递消息，并通过 Hermes 发送到 delivery 指定的绑定会话；群聊时
+  @ 订阅用户。
 - 向 EventServer 回写发送成功或失败。
 
 Plugin 不得：
@@ -59,12 +60,13 @@ EventServer 是权限、用户、订阅、事件和 delivery 状态的唯一事�
 
 ## 4. 权限契约
 
-用户权限包含两个互不隐含的维度：
+用户权限包含两个互不隐含的布尔维度和一个多值作用域权限：
 
 | 权限 | 含义 | 不代表 |
 | --- | --- | --- |
 | `chat` | 普通非命令消息可以进入 Hermes LLM | 不授予命令权限 |
-| `command` | 可以执行 `authorized` 命令、管理订阅并接收事件通知 | 不授予普通聊天权限 |
+| `command` | 可以执行 `authorized` 命令 | 不授予普通聊天或事件绑定权限 |
+| `bind` | 可以绑定并接收命中授权前缀的事件 | 不授予命令或聊天权限 |
 
 允许的权限组合：
 
@@ -83,8 +85,18 @@ EventServer 是权限、用户、订阅、事件和 delivery 状态的唯一事�
 - 管理员命令要求 `active + command=true + role=admin`。
 - `/admin` 和 `/unadmin` 只修改角色，不隐式修改权限。
 - `/grant` 和 `/revoke` 必须显式指定 `chat`、`command` 或两者。
+- `bind` scope 只接受 `*` 或小写点分隔命名空间加 `.*`；`*` 匹配全部事件，
+  `warframe.*` 匹配 `warframe.` 下的事件，`warframe.cetus.*` 只匹配更窄的命名空间。
+- 事件别名先由 EventServer 解析为规范事件键，再进行 scope 匹配；禁止任意 glob、正则和
+  不带点边界的字符串前缀。
+- `/grant <目标> bind <scope...>` 增加 scope；`/revoke <目标> bind <scope...|all>` 删除指定或
+  全部 scope。`/grant ... all` 仍只授予 `chat+command`，不会隐式授予 `bind=*`。
+- EventServer 升级到 `e91c7a4d6b20` 时会为当时已经存在的非管理员用户回填
+  `warframe.cetus.*`；迁移后新建用户仍需管理员显式授予 bind scope。
 - 授权和撤销必须幂等。
 - 撤销 `command` 后保留订阅但暂停生效，不创建新 delivery；重新授予后不补发停权期间事件。
+- 撤销或收窄 `bind` 后同样保留但暂停不再授权的订阅；用户仍可 `/unbind` 删除它们，重新授权
+  后不补发停权期间事件。
 
 稳定权限响应结构：
 
@@ -96,7 +108,8 @@ EventServer 是权限、用户、订阅、事件和 delivery 状态的唯一事�
   "role": "user",
   "permissions": {
     "chat": false,
-    "command": true
+    "command": true,
+    "bind": ["warframe.cetus.*"]
   }
 }
 ```
@@ -121,11 +134,13 @@ EventServer 是权限、用户、订阅、事件和 delivery 状态的唯一事�
 | `/help` | public | 查看帮助 |
 | `/events [event_key]` | public | 查看可订阅事件；带参数时列出该事件的可关注项 |
 | `/whoami` | public | 查看自己的脱敏身份和权限 |
-| `/bind <event_key> [关注项...]` | authorized | 订阅事件，可指定要关注的目标项 |
+| `/bind <event_key> [关注项...]` | authorized | 订阅事件，可指定关注项，并记录当前绑定会话 |
 | `/unbind <event_key>` | authorized | 取消订阅 |
-| `/bindings` | authorized | 查看订阅及其关注项 |
-| `/grant <目标或 pairing_code> chat\|command\|all` | admin | 授予权限 |
-| `/revoke <目标> chat\|command\|all` | admin | 撤销权限 |
+| `/bindings` | authorized | 查看订阅、关注项和绑定会话类型 |
+| `/grant <目标或 pairing_code> chat\|command\|all` | admin | 授予布尔权限 |
+| `/grant <目标> bind <scope...>` | admin | 增加事件绑定前缀权限 |
+| `/revoke <目标> chat\|command\|all` | admin | 撤销布尔权限 |
+| `/revoke <目标> bind <scope...\|all>` | admin | 删除指定或全部事件绑定前缀权限 |
 | `/admin <目标>` | admin | 设置管理员角色 |
 | `/unadmin <目标>` | admin | 移除管理员角色 |
 | `/permissions <目标>` | admin | 查看目标权限 |
@@ -184,10 +199,20 @@ EventServer 是权限、用户、订阅、事件和 delivery 状态的唯一事�
 `/bind` 一个或多个关注项即只接收命中这些项的投递；不指定关注项表示关注该事件的全部内容，
 但事件声明 `match_keys_required` 时必须显式指定。
 
+`/bind` 除命令策略的 `active + command=true` 外，还要求规范事件键命中调用者至少一个 `bind`
+scope。EventServer 在创建或更新订阅时再次检查，并在发布时再次过滤 delivery；Plugin 不自行
+决定前缀是否命中。`/unbind` 不要求原 scope 仍然存在，以便用户在权限收窄后清理旧订阅。
+
 Plugin 接受关注项的任务键或目录里的中文名（大小写不敏感），并在提交前映射成规范任务键；
 EventServer 只接受目录声明的键，因此该映射属于确定性的输入规范化，不是权限或事件判定。
 关注项由 EventServer 校验，用户无法写入目录之外的任意值。重复绑定同一事件时，关注项以
 最后一次为准。
+
+`/bind` 必须把可信消息上下文中的 `chat_type` 和 `chat_id` 作为 `binding_context` 一并提交。
+私聊绑定的确认回复发回该私聊；群聊绑定的确认回复发回原群，并使用可信发送者 OpenID @ 发起
+绑定的用户。该 @ 只属于 QQ 适配层展示，不进入 EventServer 数据或命令文本。重复绑定同一事件
+时，绑定来源以最后一次成功请求为准；旧订阅没有来源时显示为未知会话。EventServer 创建
+delivery 时固化当时的绑定目标：私聊绑定后续私聊通知，群聊绑定后续发到原群并 @ 订阅用户。
 
 `public` 只表示无需业务授权，不表示匿名。`/whoami` 只能展示调用者自己的脱敏信息。
 无法可靠解析被 @ 用户的 OpenID 时必须使用 pairing code 或明确 OpenID，不得按昵称授权。
@@ -196,13 +221,13 @@ EventServer 只接受目录声明的键，因此该映射属于确定性的输�
 
 | Plugin 动作 | EventServer API | 契约要求 |
 | --- | --- | --- |
-| 查询权限 | `GET /v1/users/{openid}/permission` | 返回账号状态、角色、`chat`、`command` |
+| 查询权限 | `GET /v1/users/{openid}/permission` | 返回账号状态、角色、`chat`、`command`、`bind[]` |
 | 查看事件 | `GET /v1/events` | 只返回已注册且启用的事件；可关注项来自目录声明 |
-| 查看订阅 | `GET /v1/users/{openid}/subscriptions` | 返回稳定 event key 与该订阅的关注项 |
-| 新增订阅 | `POST /v1/users/{openid}/subscriptions` | 幂等，可携带 `match_keys`；响应回显 `match_keys` 与 `updated` |
+| 查看订阅 | `GET /v1/users/{openid}/subscriptions` | 返回稳定 event key、关注项与可空 `binding_context` |
+| 新增订阅 | `POST /v1/users/{openid}/subscriptions` | 幂等，可携带 `match_keys` 和 `binding_context`；响应回显当前值与 `updated` |
 | 删除订阅 | `DELETE /v1/users/{openid}/subscriptions/{event_key}` | 幂等 |
-| 授予权限 | `POST /v1/users/{openid}/grant` | 显式权限维度，管理员操作 |
-| 撤销权限 | `POST /v1/users/{openid}/revoke` | 显式权限维度，管理员操作 |
+| 授予权限 | `POST /v1/users/{openid}/grant` | 布尔权限或 `bind[]` scope，管理员操作 |
+| 撤销权限 | `POST /v1/users/{openid}/revoke` | 布尔权限、指定 `bind[]` 或清空 scope，管理员操作 |
 | 修改角色 | `POST /v1/users/{openid}/role` | 不隐式修改权限 |
 | 生成授权码 | `POST /v1/pairing-codes` | 只能绑定可信 OpenID |
 | 批准授权码 | `POST /v1/pairing-codes/{code}/approve` | 管理员操作 |
@@ -254,7 +279,9 @@ Content-Type: application/json
       "event_key": "warframe.cetus.night",
       "target": {
         "platform": "qqbot",
-        "openid": "TARGET_USER_OPENID"
+        "openid": "TARGET_USER_OPENID",
+        "chat_type": "group",
+        "chat_id": "TARGET_GROUP_OPENID"
       },
       "message": {
         "text": "【帐篷 A】\n• 搜索并救援",
@@ -283,7 +310,8 @@ Plugin 对每条记录执行：
    `• <label>` 整行渲染为 `• **<label>** 🔴`。禁止模糊或全文替换；同一行内的
    其他内容、相似名称和非项目符号行不得命中。
 3. 元数据缺失或非法时保持原文；渲染后超过消息长度上限时回退原文并重新校验。
-4. 调用已验证的 Hermes 主动私聊接口，只发送到记录指定的目标。
+4. 调用已验证的 Hermes 发送接口，只发送到 `target.chat_id`；`chat_type=group` 时在正文前
+   @ `target.openid`，`chat_type=dm` 时不添加 @。
 5. 成功后调用 `ack`，携带 `lease_token`、发送时间和可用时的平台消息 ID。
 6. 失败后调用 `fail`，携带 `lease_token`、脱敏 `error_code` 和 `retryable`。
 7. 单条失败不得终止整个 worker，也不得阻塞 QQ 入站处理。
@@ -306,7 +334,7 @@ Plugin 对每条记录执行：
 ## 9. 缓存与故障处理
 
 - 权限查询可以使用进程内短期缓存，建议 TTL 为 30 至 60 秒。
-- 授权、撤销、角色变更或封禁成功后必须立即清除相关缓存。
+- 授权、撤销、`bind` scope、角色变更或封禁成功后必须立即清除相关缓存。
 - 命令策略和稳定事件目录可以在进程内缓存。
 - 权限、订阅、事件、delivery 和租约不得只放在缓存中。
 - 空队列或 EventServer 暂时不可用时使用带抖动的退避，不阻塞 Hermes 主链路。
@@ -326,6 +354,7 @@ Plugin 对每条记录执行：
 实现和变更必须覆盖：
 
 - `chat`/`command` 四种权限组合。
+- `bind` scope 的全局、宽前缀、窄前缀、命名空间边界不匹配、撤销和默认拒绝。
 - `public`/`authorized`/`admin` 命令矩阵和 blocked 优先级。
 - 未知命令和命令异常不进入 LLM。
 - 授权、撤销、订阅和取消订阅幂等。

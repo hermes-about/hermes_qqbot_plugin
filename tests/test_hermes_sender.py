@@ -26,6 +26,8 @@ def test_gateway_sender_handles_reply_and_worker_thread_delivery() -> None:
         sender.bind_adapter("qqbot", adapter)
         identity = MessageIdentity("qqbot", "user", "chat", "dm", "/help")
         sender.reply(identity, "reply")
+        group_identity = MessageIdentity("qqbot", "member-openid", "group", "group", "/bind x")
+        sender.reply(group_identity, "已订阅。", mention_sender=True)
         sender.reply_image(identity, "https://example.invalid/image.png")
         await asyncio.sleep(0)
         item = DeliveryItem(
@@ -40,12 +42,37 @@ def test_gateway_sender_handles_reply_and_worker_thread_delivery() -> None:
             datetime.now(UTC),
         )
         outcome = await asyncio.to_thread(sender.send_delivery, item)
+        group_item = DeliveryItem(
+            "group-delivery",
+            "l" * 32,
+            "event",
+            "demo.event.changed",
+            "qqbot",
+            "member-openid",
+            {"text": "group notice"},
+            1,
+            datetime.now(UTC),
+            chat_type="group",
+            chat_id="group-openid",
+        )
+        group_outcome = await asyncio.to_thread(sender.send_delivery, group_item)
         assert outcome.success is True
         assert outcome.message_id == "message-1"
+        assert group_outcome.success is True
         assert adapter.calls == [
             ("text", "chat", "reply"),
+            (
+                "text",
+                "group",
+                '<qqbot-at-user id="member-openid" /> 已订阅。',
+            ),
             ("image", "chat", "https://example.invalid/image.png", None),
             ("text", "target", "notice"),
+            (
+                "text",
+                "group-openid",
+                '<qqbot-at-user id="member-openid" /> group notice',
+            ),
         ]
 
     asyncio.run(scenario())

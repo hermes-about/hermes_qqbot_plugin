@@ -102,7 +102,11 @@ class PluginRuntime:
                     extract_identity(event), decision.image_url, caption=decision.reply
                 )
             elif decision.reply:
-                self.sender.reply(extract_identity(event), decision.reply)
+                self.sender.reply(
+                    extract_identity(event),
+                    decision.reply,
+                    mention_sender=decision.mention_sender,
+                )
             if decision.action == "allow":
                 return {"action": "allow"}
             return {"action": "skip", "reason": decision.reason}

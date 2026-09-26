@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 
 from autoqq_business_plugin.delivery_worker import DeliveryWorker
@@ -16,6 +17,7 @@ def delivery(identifier: str = "delivery-1", *, text="hello", platform="qqbot", 
         message={"text": text, "data": data or {}},
         attempt=1,
         created_at=datetime.now(UTC),
+        chat_id="target-openid",
     )
 
 
@@ -91,6 +93,15 @@ def test_invalid_target_or_message_is_dead_lettered_without_send() -> None:
         ("wrong-platform", "l" * 32, "INVALID_TARGET", False),
         ("too-long", "l" * 32, "INVALID_MESSAGE", False),
     ]
+
+
+def test_invalid_delivery_chat_context_is_dead_lettered() -> None:
+    item = replace(delivery(), chat_type="channel", chat_id="channel-id")
+    client = FakeDeliveryClient([item])
+    sender = FakeSender()
+    worker(client, sender).run_once()
+    assert sender.sent == []
+    assert client.failures == [("delivery-1", "l" * 32, "INVALID_TARGET", False)]
 
 
 def test_writeback_failure_does_not_crash_batch() -> None:

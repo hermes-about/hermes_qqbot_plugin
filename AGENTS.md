@@ -9,7 +9,7 @@
 
 Plugin 是 Hermes Gateway 加载的 QQ 业务插件。它在 `pre_gateway_dispatch` 中完成身份提取、
 命令处理和聊天授权；在 QQBot adapter 可用后启动 delivery worker，领取 EventServer 的待发送
-消息，并经 Hermes adapter 主动私聊。Plugin 不连接 MySQL、不采集事件源、不判断事件触发，
+消息，并经 Hermes adapter 发送到订阅时记录的私聊或群聊（群聊 @ 订阅用户）。Plugin 不连接 MySQL、不采集事件源、不判断事件触发，
 也不直接调用腾讯 QQ API。用户、权限、订阅、事件和 delivery 的事实来源是 EventServer。
 
 `plugin/` 与 `eventserver/` 是两个独立 Git 仓库；本目录内的提交、测试和发布只覆盖 Plugin。
@@ -51,7 +51,8 @@ YAML，由代码使用 JSON 解析；修改时保持可被 `json.loads` 读取�
 - 按需查询只接受 `config/queries.yaml` 声明的主题和查询服务目录声明的参数。用户不能提交
   任意 URL、路径或表达式；`QUERY_SERVICE_TOKEN` 与 `INTERNAL_API_TOKEN` 和 Publisher
   发布 Token 分开。查询失败给固定降级回复，不进入 LLM，也不创建订阅或 delivery。
-- delivery worker 只领取、验证目标与内容、经 Hermes adapter 私聊，再回写 `ack`/`fail`。
+- delivery worker 只领取、验证目标与内容、经 Hermes adapter 发送到 delivery 固化的绑定会话，
+  群聊目标需 @ 订阅用户，再回写 `ack`/`fail`。
   重试次数、时间和 `dead` 状态由 EventServer 决定。发送成功但 `ack` 前崩溃可能重复发送，
   因此只能宣称至少一次投递。
 - `delivery_renderer.py` 只解释通用 `subscription_match` 元数据，并只精确替换

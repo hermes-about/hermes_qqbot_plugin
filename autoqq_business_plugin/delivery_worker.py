@@ -127,7 +127,14 @@ class DeliveryWorker:
             )
 
     def _validate(self, item: DeliveryItem) -> SendOutcome | None:
-        if item.platform != self._platform or not item.openid or len(item.openid) > 128:
+        if (
+            item.platform != self._platform
+            or not item.openid
+            or len(item.openid) > 128
+            or item.chat_type not in {"dm", "group"}
+            or not item.chat_id
+            or len(item.chat_id) > 256
+        ):
             return SendOutcome(False, error_code="INVALID_TARGET", retryable=False)
         text = item.message.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > self._max_message_chars:

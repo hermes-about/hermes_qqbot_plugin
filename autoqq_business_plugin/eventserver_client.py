@@ -8,6 +8,7 @@ from uuid import uuid4
 import httpx
 
 from .models import (
+    BindingContext,
     DeliveryItem,
     EventInfo,
     MatchKeyOption,
@@ -70,6 +71,14 @@ def _match_keys(value: Any, field: str) -> tuple[str, ...]:
     return tuple(value)
 
 
+def _bind_scopes(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(item, str) and item for item in value):
+        raise EventServerProtocolError("invalid permissions.bind")
+    return tuple(value)
+
+
 def _match_key_options(value: Any) -> tuple[MatchKeyOption, ...]:
     if value is None:
         return ()
@@ -85,6 +94,19 @@ def _match_key_options(value: Any) -> tuple[MatchKeyOption, ...]:
             )
         )
     return tuple(options)
+
+
+def _binding_context(value: Any) -> BindingContext | None:
+    if value is None:
+        return None
+    data = _object(value)
+    chat_type = _text(data.get("chat_type"), "binding_context.chat_type")
+    if chat_type not in {"dm", "group"}:
+        raise EventServerProtocolError("invalid binding_context.chat_type")
+    return BindingContext(
+        chat_type=chat_type,
+        chat_id=_text(data.get("chat_id"), "binding_context.chat_id"),
+    )
 
 
 class EventServerClient:
@@ -176,6 +198,7 @@ class EventServerClient:
             role=role,
             chat=_boolean(permissions.get("chat"), "permissions.chat"),
             command=_boolean(permissions.get("command"), "permissions.command"),
+            bind=_bind_scopes(permissions.get("bind")),
         )
 
     def get_permission(self, platform: str, openid: str) -> PermissionSnapshot:
@@ -221,6 +244,7 @@ class EventServerClient:
                 event_key=_text(_object(item).get("event_key"), "event_key"),
                 locale=_text(_object(item).get("locale"), "locale"),
                 match_keys=_match_keys(_object(item).get("match_keys"), "match_keys"),
+                binding_context=_binding_context(_object(item).get("binding_context")),
             )
             for item in payload
         ]
@@ -231,12 +255,19 @@ class EventServerClient:
         openid: str,
         event_key: str,
         match_keys: tuple[str, ...] | None = None,
+        binding_context: BindingContext | None = None,
     ) -> SubscriptionInfo:
+        body: dict[str, Any] = {"event_key": event_key, "match_keys": list(match_keys or ())}
+        if binding_context is not None:
+            body["binding_context"] = {
+                "chat_type": binding_context.chat_type,
+                "chat_id": binding_context.chat_id,
+            }
         data = _object(
             self._request(
                 "POST",
                 f"/v1/users/{quote(openid, safe='')}/subscriptions",
-                payload={"event_key": event_key, "match_keys": list(match_keys or ())},
+                payload=body,
                 params={"platform": platform},
             )
         )
@@ -248,6 +279,7 @@ class EventServerClient:
             changed=created or updated,
             match_keys=_match_keys(data.get("match_keys"), "match_keys"),
             updated=updated,
+            binding_context=_binding_context(data.get("binding_context")),
         )
 
     def unsubscribe(self, platform: str, openid: str, event_key: str) -> SubscriptionInfo:
@@ -289,6 +321,18 @@ class EventServerClient:
             )
         )
 
+    def grant_bind(
+        self, platform: str, target: str, scopes: list[str], operator: str
+    ) -> PermissionSnapshot:
+        return self._permission(
+            self._request(
+                "POST",
+                f"/v1/users/{quote(target, safe='')}/grant",
+                payload={"permissions": [], "bind": scopes, "operator_openid": operator},
+                params={"platform": platform},
+            )
+        )
+
     def approve_pairing(
         self, platform: str, code: str, permissions: list[str], operator: str
     ) -> PermissionSnapshot:
@@ -312,6 +356,29 @@ class EventServerClient:
                 "POST",
                 f"/v1/users/{quote(target, safe='')}/revoke",
                 payload={"permissions": permissions, "operator_openid": operator},
+                params={"platform": platform},
+            )
+        )
+
+    def revoke_bind(
+        self,
+        platform: str,
+        target: str,
+        scopes: list[str],
+        operator: str,
+        *,
+        clear_all: bool = False,
+    ) -> PermissionSnapshot:
+        return self._permission(
+            self._request(
+                "POST",
+                f"/v1/users/{quote(target, safe='')}/revoke",
+                payload={
+                    "permissions": [],
+                    "bind": scopes,
+                    "clear_bind": clear_all,
+                    "operator_openid": operator,
+                },
                 params={"platform": platform},
             )
         )
@@ -349,6 +416,11 @@ class EventServerClient:
             data = _object(item)
             target = _object(data.get("target"))
             message = _object(data.get("message"))
+            target_openid = _text(target.get("openid"), "target.openid")
+            chat_type = _optional_text(target.get("chat_type"), "target.chat_type") or "dm"
+            if chat_type not in {"dm", "group"}:
+                raise EventServerProtocolError("invalid target.chat_type")
+            chat_id = _optional_text(target.get("chat_id"), "target.chat_id") or target_openid
             try:
                 created_at = datetime.fromisoformat(_text(data.get("created_at"), "created_at"))
                 attempt = int(data.get("attempt"))
@@ -361,10 +433,12 @@ class EventServerClient:
                     event_id=_text(data.get("event_id"), "event_id"),
                     event_key=_text(data.get("event_key"), "event_key"),
                     platform=_text(target.get("platform"), "target.platform"),
-                    openid=_text(target.get("openid"), "target.openid"),
+                    openid=target_openid,
                     message=message,
                     attempt=attempt,
                     created_at=created_at,
+                    chat_type=chat_type,
+                    chat_id=chat_id,
                 )
             )
         return result

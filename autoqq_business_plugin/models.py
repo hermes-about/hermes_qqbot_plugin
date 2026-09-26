@@ -27,6 +27,7 @@ class PermissionSnapshot:
     role: str
     chat: bool
     command: bool
+    bind: tuple[str, ...] = ()
 
     @property
     def blocked(self) -> bool:
@@ -54,6 +55,7 @@ class DispatchDecision:
     reason: str
     reply: str | None = None
     image_url: str | None = None
+    mention_sender: bool = False
 
 
 @dataclass(frozen=True)
@@ -69,6 +71,12 @@ class MatchKeyOption:
     key: str
     label: str
     aliases: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BindingContext:
+    chat_type: str
+    chat_id: str
 
 
 def resolve_match_key(options: tuple[MatchKeyOption, ...], token: str) -> str | None:
@@ -238,6 +246,7 @@ class SubscriptionInfo:
     changed: bool | None = None
     match_keys: tuple[str, ...] = ()
     updated: bool = False
+    binding_context: BindingContext | None = None
 
 
 @dataclass(frozen=True)
@@ -251,6 +260,8 @@ class DeliveryItem:
     message: dict[str, Any]
     attempt: int
     created_at: datetime
+    chat_type: str = "dm"
+    chat_id: str = ""
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,7 @@ import pytest
 from autoqq_business_plugin.command_policy import CommandPolicyRegistry
 from autoqq_business_plugin.commands import CommandService
 from autoqq_business_plugin.models import (
+    BindingContext,
     EventInfo,
     MatchKeyOption,
     PermissionSnapshot,
@@ -17,12 +18,19 @@ from autoqq_business_plugin.processor import MessageProcessor
 from autoqq_business_plugin.rate_limit import SlidingWindowRateLimiter
 
 
-def message(text: str, openid: str = "user-openid", platform: str = "qqbot"):
+def message(
+    text: str,
+    openid: str = "user-openid",
+    platform: str = "qqbot",
+    *,
+    chat_type: str = "dm",
+    chat_id: str | None = None,
+):
     source = SimpleNamespace(
         platform=platform,
         user_id=openid,
-        chat_id=openid if platform == "qqbot" else "chat-id",
-        chat_type="dm",
+        chat_id=chat_id or (openid if platform == "qqbot" else "chat-id"),
+        chat_type=chat_type,
     )
     return SimpleNamespace(source=source, text=text, message_id="message-1")
 
@@ -69,9 +77,24 @@ class FakeClient:
         self.calls.append(("bindings", platform, openid))
         return list(self.subscriptions)
 
-    def subscribe(self, platform: str, openid: str, event_key: str, match_keys=None):
-        self.calls.append(("bind", platform, openid, event_key, tuple(match_keys or ())))
-        return SubscriptionInfo(event_key, "zh-CN", True, tuple(match_keys or ()), self.updated)
+    def subscribe(
+        self,
+        platform: str,
+        openid: str,
+        event_key: str,
+        match_keys=None,
+        binding_context: BindingContext | None = None,
+    ):
+        binding = (binding_context.chat_type, binding_context.chat_id) if binding_context else None
+        self.calls.append(("bind", platform, openid, event_key, tuple(match_keys or ()), binding))
+        return SubscriptionInfo(
+            event_key,
+            "zh-CN",
+            True,
+            tuple(match_keys or ()),
+            self.updated,
+            binding_context,
+        )
 
     def unsubscribe(self, platform: str, openid: str, event_key: str):
         self.calls.append(("unbind", platform, openid, event_key))
@@ -83,8 +106,34 @@ class FakeClient:
 
     def grant(self, platform: str, target: str, permissions: list[str], operator: str):
         self.calls.append(("grant", platform, target, tuple(permissions), operator))
+        current = self.permissions.get(
+            target, PermissionSnapshot(platform, target, "active", "user", False, False)
+        )
         result = PermissionSnapshot(
-            platform, target, "active", "user", "chat" in permissions, "command" in permissions
+            platform,
+            target,
+            current.account_status,
+            current.role,
+            current.chat or "chat" in permissions,
+            current.command or "command" in permissions,
+            current.bind,
+        )
+        self.permissions[target] = result
+        return result
+
+    def grant_bind(self, platform: str, target: str, scopes: list[str], operator: str):
+        self.calls.append(("grant-bind", platform, target, tuple(scopes), operator))
+        current = self.permissions.get(
+            target, PermissionSnapshot(platform, target, "active", "user", False, False)
+        )
+        result = PermissionSnapshot(
+            platform,
+            target,
+            current.account_status,
+            current.role,
+            current.chat,
+            current.command,
+            tuple(sorted(set(current.bind).union(scopes))),
         )
         self.permissions[target] = result
         return result
@@ -95,11 +144,65 @@ class FakeClient:
 
     def revoke(self, platform: str, target: str, permissions: list[str], operator: str):
         self.calls.append(("revoke", platform, target, tuple(permissions), operator))
-        return PermissionSnapshot(platform, target, "active", "user", False, False)
+        current = self.permissions.get(
+            target, PermissionSnapshot(platform, target, "active", "user", False, False)
+        )
+        result = PermissionSnapshot(
+            platform,
+            target,
+            current.account_status,
+            current.role,
+            current.chat and "chat" not in permissions,
+            current.command and "command" not in permissions,
+            current.bind,
+        )
+        self.permissions[target] = result
+        return result
+
+    def revoke_bind(
+        self,
+        platform: str,
+        target: str,
+        scopes: list[str],
+        operator: str,
+        *,
+        clear_all: bool = False,
+    ):
+        self.calls.append(("revoke-bind", platform, target, tuple(scopes), operator, clear_all))
+        current = self.permissions.get(
+            target, PermissionSnapshot(platform, target, "active", "user", False, False)
+        )
+        remaining = (
+            () if clear_all else tuple(scope for scope in current.bind if scope not in scopes)
+        )
+        result = PermissionSnapshot(
+            platform,
+            target,
+            current.account_status,
+            current.role,
+            current.chat,
+            current.command,
+            remaining,
+        )
+        self.permissions[target] = result
+        return result
 
     def change_role(self, platform: str, target: str, role: str, operator: str):
         self.calls.append(("role", platform, target, role, operator))
-        return PermissionSnapshot(platform, target, "active", role, False, False)
+        current = self.permissions.get(
+            target, PermissionSnapshot(platform, target, "active", "user", False, False)
+        )
+        result = PermissionSnapshot(
+            platform,
+            target,
+            current.account_status,
+            role,
+            current.chat,
+            current.command,
+            current.bind,
+        )
+        self.permissions[target] = result
+        return result
 
 
 @pytest.fixture

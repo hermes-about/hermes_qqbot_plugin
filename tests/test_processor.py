@@ -1,7 +1,10 @@
 import pytest
 from conftest import FakeClient, make_processor, message
 
-from autoqq_business_plugin.eventserver_client import EventServerUnavailable
+from autoqq_business_plugin.eventserver_client import (
+    EventServerResponseError,
+    EventServerUnavailable,
+)
 from autoqq_business_plugin.models import PermissionSnapshot
 
 
@@ -61,6 +64,65 @@ def test_admin_command_uses_real_actor_and_explicit_dimension(policy) -> None:
     valid = processor.process(message("/grant target-openid command"))
     assert valid.reason == "command-handled"
     assert ("grant", "qqbot", "target-openid", ("command",), "user-openid") in client.calls
+
+
+def test_admin_can_grant_and_clear_scoped_bind_permission(policy) -> None:
+    admin = PermissionSnapshot("qqbot", "user-openid", "active", "admin", True, True, ("*",))
+    client = FakeClient(admin)
+    processor = make_processor(client, policy)
+
+    granted = processor.process(message("/grant target-openid bind warframe.* warframe.cetus.*"))
+    assert granted.reason == "command-handled"
+    assert "bind=warframe.*,warframe.cetus.*" in (granted.reply or "")
+    assert (
+        "grant-bind",
+        "qqbot",
+        "target-openid",
+        ("warframe.*", "warframe.cetus.*"),
+        "user-openid",
+    ) in client.calls
+
+    cleared = processor.process(message("/revoke target-openid bind all"))
+    assert cleared.reason == "command-handled"
+    assert "bind=none" in (cleared.reply or "")
+    assert (
+        "revoke-bind",
+        "qqbot",
+        "target-openid",
+        (),
+        "user-openid",
+        True,
+    ) in client.calls
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "/grant target-openid bind warframe*",
+        "/grant target-openid bind Warframe.*",
+        "/revoke target-openid bind all warframe.*",
+        "/grant ABCDEFGH bind warframe.*",
+    ],
+)
+def test_bind_scope_admin_commands_reject_ambiguous_input(policy, text: str) -> None:
+    admin = PermissionSnapshot("qqbot", "user-openid", "active", "admin", True, True)
+    decision = make_processor(FakeClient(admin), policy).process(message(text))
+    assert decision.reason == "command-handled"
+    assert "bind" in (decision.reply or "")
+
+
+def test_bind_scope_denial_is_reported_without_falling_into_llm(policy) -> None:
+    class DeniedClient(FakeClient):
+        def subscribe(self, *args, **kwargs):
+            raise EventServerResponseError(403, "FORBIDDEN")
+
+    active = PermissionSnapshot("qqbot", "user-openid", "active", "user", False, True)
+    decision = make_processor(DeniedClient(active), policy).process(
+        message("/bind demo.event.changed")
+    )
+    assert decision.action == "skip"
+    assert decision.reason == "command-handled"
+    assert "bind 权限" in (decision.reply or "")
 
 
 def test_pairing_code_grant_and_mention_fail_safe(policy) -> None:
